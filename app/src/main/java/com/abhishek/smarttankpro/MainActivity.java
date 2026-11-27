@@ -3,6 +3,7 @@ package com.abhishek.smarttankpro;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -12,6 +13,7 @@ import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.graphics.pdf.PdfDocument;
 import android.graphics.pdf.PdfRenderer;
 import android.hardware.usb.UsbDevice;
@@ -26,6 +28,10 @@ import android.print.PrintDocumentAdapter;
 import android.print.PrintDocumentInfo;
 import android.print.PrintManager;
 import android.provider.MediaStore;
+import android.transition.AutoTransition;
+import android.transition.TransitionManager;
+import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.WebView;
@@ -56,8 +62,14 @@ public class MainActivity extends AppCompatActivity {
 
     private String connectionMode = "Wi-Fi";
     private String printerIp = "192.168.1.100";
-    private TextView statusBanner, pageCounterText;
+    private int colorModeSelection = 0; // 0 = Full Color, 1 = Black & White, 2 = Sharp B&W Photocopy
+
+    private LinearLayout rootContainer;
+    private TextView statusBanner, pageCounterText, modeBadgeText;
     private ImageView hdPreviewImage;
+    private Button[] modeButtons = new Button[3];
+    private Button[] colorButtons = new Button[3];
+
     private Spinner paperSizeSpinner, mediaQualitySpinner, scalingSpinner, marginSpinner, duplexSpinner, multiPageSpinner, pageRangeSpinner;
     private CheckBox reverseOrderCheck;
 
@@ -65,7 +77,7 @@ public class MainActivity extends AppCompatActivity {
     private PdfRenderer pdfRenderer;
     private int currentPageIndex = 0;
     private int totalPdfPages = 0;
-    private Bitmap currentPreviewBitmap;
+    private Bitmap rawPreviewBitmap;
     private Bitmap idFrontBitmap, idBackBitmap;
     private boolean pickingPdfForIdFront = false;
     private boolean pickingPdfForIdBack = false;
@@ -82,9 +94,9 @@ public class MainActivity extends AppCompatActivity {
                     if (photo != null) {
                         closePdf();
                         totalPdfPages = 1;
-                        currentPreviewBitmap = applyScanEnhancement(photo);
-                        hdPreviewImage.setImageBitmap(currentPreviewBitmap);
-                        pageCounterText.setText("Camera Scan Ready (Enhanced B&W)");
+                        rawPreviewBitmap = photo;
+                        setColorMode(2); // Auto-switch to Sharp B&W for camera scan
+                        pageCounterText.setText("Camera Scan Ready (Tap Color/B&W above to switch)");
                     }
                 }
             });
@@ -92,7 +104,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        buildProUi();
+        buildModernAnimatedUi();
         checkUsbPrinter();
     }
 
@@ -100,6 +112,35 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         closePdf();
+    }
+
+    private int dp(float val) {
+        return Math.round(val * getResources().getDisplayMetrics().density);
+    }
+
+    private GradientDrawable makeRoundBg(int fillColor, int strokeColor, int strokeWidthPx, float radiusDp) {
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(fillColor);
+        if (strokeWidthPx > 0) gd.setStroke(strokeWidthPx, strokeColor);
+        gd.setCornerRadius(dp(radiusDp));
+        return gd;
+    }
+
+    private GradientDrawable makeGradientBg(int startColor, int endColor, float radiusDp) {
+        GradientDrawable gd = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{startColor, endColor});
+        gd.setCornerRadius(dp(radiusDp));
+        return gd;
+    }
+
+    private void attachBounce(View view) {
+        view.setOnTouchListener((v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                v.animate().scaleX(0.95f).scaleY(0.95f).setDuration(80).start();
+            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+            }
+            return false;
+        });
     }
 
     private void closePdf() {
@@ -116,83 +157,162 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void buildProUi() {
+    private void buildModernAnimatedUi() {
         ScrollView rootScroll = new ScrollView(this);
-        rootScroll.setBackgroundColor(Color.parseColor("#F1F5F9"));
+        rootScroll.setBackgroundColor(Color.parseColor("#EEF2F6"));
 
-        LinearLayout main = new LinearLayout(this);
-        main.setOrientation(LinearLayout.VERTICAL);
-        main.setPadding(28, 28, 28, 60);
-        rootScroll.addView(main);
+        rootContainer = new LinearLayout(this);
+        rootContainer.setOrientation(LinearLayout.VERTICAL);
+        rootContainer.setPadding(dp(14), dp(14), dp(14), dp(36));
+        rootScroll.addView(rootContainer);
+
+        // 1. HERO HEADER CARD (HP Blue Gradient)
+        LinearLayout headerCard = new LinearLayout(this);
+        headerCard.setOrientation(LinearLayout.VERTICAL);
+        headerCard.setBackground(makeGradientBg(Color.parseColor("#0077C8"), Color.parseColor("#004B87"), 20));
+        headerCard.setPadding(dp(18), dp(18), dp(18), dp(18));
+        headerCard.setElevation(dp(6));
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("HP Smart Tank 589 Pro");
-        title.setTextSize(22);
+        title.setText("HP Smart Tank 589");
+        title.setTextSize(21);
         title.setTypeface(null, Typeface.BOLD);
-        title.setTextColor(Color.parseColor("#005A9E"));
-        main.addView(title);
+        title.setTextColor(Color.WHITE);
+        title.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        titleRow.addView(title);
+
+        modeBadgeText = new TextView(this);
+        modeBadgeText.setText("● Wi-Fi");
+        modeBadgeText.setTextSize(12);
+        modeBadgeText.setTypeface(null, Typeface.BOLD);
+        modeBadgeText.setTextColor(Color.parseColor("#004B87"));
+        modeBadgeText.setBackground(makeRoundBg(Color.parseColor("#E0F2FE"), 0, 0, 20));
+        modeBadgeText.setPadding(dp(12), dp(5), dp(12), dp(5));
+        titleRow.addView(modeBadgeText);
+        headerCard.addView(titleRow);
 
         statusBanner = new TextView(this);
-        statusBanner.setText("Mode: Home Wi-Fi | Ready");
-        statusBanner.setPadding(20, 16, 20, 16);
-        statusBanner.setBackgroundColor(Color.parseColor("#DBEAFE"));
-        statusBanner.setTextColor(Color.parseColor("#1E3A8A"));
-        main.addView(statusBanner);
+        statusBanner.setText("Ready — Select a PDF or Photo to begin");
+        statusBanner.setTextSize(13);
+        statusBanner.setTextColor(Color.parseColor("#E0F2FE"));
+        statusBanner.setPadding(0, dp(8), 0, dp(14));
+        headerCard.addView(statusBanner);
 
-        LinearLayout modeRow = new LinearLayout(this);
-        modeRow.setOrientation(LinearLayout.HORIZONTAL);
-        modeRow.setPadding(0, 16, 0, 16);
+        // Animated Tri-Mode Pill Bar
+        LinearLayout modePillBar = new LinearLayout(this);
+        modePillBar.setOrientation(LinearLayout.HORIZONTAL);
+        modePillBar.setBackground(makeRoundBg(Color.parseColor("#003B6B"), 0, 0, 14));
+        modePillBar.setPadding(dp(4), dp(4), dp(4), dp(4));
+
         String[] modes = {"Wi-Fi", "Wi-Fi Direct", "USB OTG"};
-        for (String m : modes) {
+        for (int i = 0; i < modes.length; i++) {
+            final String m = modes[i];
             Button b = new Button(this);
             b.setText(m);
-            b.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            b.setAllCaps(false);
+            b.setTextSize(13);
+            b.setTypeface(null, Typeface.BOLD);
+            b.setStateListAnimator(null);
+            b.setLayoutParams(new LinearLayout.LayoutParams(0, dp(38), 1f));
+            attachBounce(b);
             b.setOnClickListener(v -> switchConnectionMode(m));
-            modeRow.addView(b);
+            modeButtons[i] = b;
+            modePillBar.addView(b);
         }
-        main.addView(modeRow);
+        headerCard.addView(modePillBar);
+        rootContainer.addView(headerCard);
+        updateModeButtonsUi();
 
-        LinearLayout actionRow1 = new LinearLayout(this);
-        actionRow1.setOrientation(LinearLayout.HORIZONTAL);
-        actionRow1.addView(makeBtn("Open PDF/Photo", v -> {
+        // 2. QUICK ACTION GRID CARD
+        LinearLayout actionCard = makeWhiteCard();
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.addView(makeTileBtn("📄 Open PDF / Photo", "#EFF6FF", "#1D4ED8", v -> {
             pickingPdfForIdFront = false;
             pickingPdfForIdBack = false;
             filePicker.launch(new String[]{"application/pdf", "image/*"});
         }));
-        actionRow1.addView(makeBtn("Camera Scan", v -> {
+        addSpace(row1, 8);
+        row1.addView(makeTileBtn("📷 Camera Scan", "#F0FDF4", "#15803D", v -> {
             Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
             cameraLauncher.launch(cam);
         }));
-        main.addView(actionRow1);
+        actionCard.addView(row1);
 
-        LinearLayout actionRow2 = new LinearLayout(this);
-        actionRow2.setOrientation(LinearLayout.HORIZONTAL);
-        actionRow2.addView(makeBtn("PDF/Photo ID Maker", v -> showIdCardDialog()));
-        actionRow2.addView(makeBtn("Ink & EWS Tools", v -> openPrinterDashboard()));
-        main.addView(actionRow2);
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setPadding(0, dp(8), 0, 0);
+        row2.addView(makeTileBtn("🪪 ID Card Extractor", "#FEF3C7", "#B45309", v -> showIdCardDialog()));
+        addSpace(row2, 8);
+        row2.addView(makeTileBtn("💧 Ink & Dashboard", "#F3E8FF", "#6D28D9", v -> openPrinterDashboard()));
+        actionCard.addView(row2);
+        rootContainer.addView(actionCard);
 
+        // 3. COLOR vs BLACK & WHITE LIVE SWITCHER CARD
+        LinearLayout colorCard = makeWhiteCard();
+        colorCard.addView(makeSectionTitle("🎨 Color Mode (Live Preview & Print)"));
+
+        LinearLayout colorPillBar = new LinearLayout(this);
+        colorPillBar.setOrientation(LinearLayout.HORIZONTAL);
+        colorPillBar.setBackground(makeRoundBg(Color.parseColor("#F1F5F9"), Color.parseColor("#CBD5E1"), dp(1), 14));
+        colorPillBar.setPadding(dp(4), dp(4), dp(4), dp(4));
+
+        String[] colorLabels = {"🌈 Full Color", "⚫ Black & White", "📄 Sharp B&W"};
+        for (int i = 0; i < colorLabels.length; i++) {
+            final int idx = i;
+            Button cb = new Button(this);
+            cb.setText(colorLabels[i]);
+            cb.setAllCaps(false);
+            cb.setTextSize(12);
+            cb.setTypeface(null, Typeface.BOLD);
+            cb.setStateListAnimator(null);
+            cb.setLayoutParams(new LinearLayout.LayoutParams(0, dp(40), 1f));
+            attachBounce(cb);
+            cb.setOnClickListener(v -> setColorMode(idx));
+            colorButtons[i] = cb;
+            colorPillBar.addView(cb);
+        }
+        colorCard.addView(colorPillBar);
+        rootContainer.addView(colorCard);
+        updateColorButtonsUi();
+
+        // 4. HD LIVE PREVIEW CARD
+        LinearLayout previewCard = makeWhiteCard();
         pageCounterText = new TextView(this);
-        pageCounterText.setText("No file loaded - Select PDF or Image above");
-        pageCounterText.setPadding(0, 16, 0, 8);
+        pageCounterText.setText("No file loaded — Tap 'Open PDF / Photo' above");
+        pageCounterText.setTextSize(13);
         pageCounterText.setTypeface(null, Typeface.BOLD);
-        main.addView(pageCounterText);
+        pageCounterText.setTextColor(Color.parseColor("#0F172A"));
+        pageCounterText.setPadding(0, 0, 0, dp(10));
+        previewCard.addView(pageCounterText);
 
         hdPreviewImage = new ImageView(this);
-        hdPreviewImage.setMinimumHeight(520);
-        hdPreviewImage.setMaxHeight(680);
+        hdPreviewImage.setMinimumHeight(dp(240));
+        hdPreviewImage.setMaxHeight(dp(340));
         hdPreviewImage.setAdjustViewBounds(true);
-        hdPreviewImage.setBackgroundColor(Color.WHITE);
-        hdPreviewImage.setPadding(12, 12, 12, 12);
-        main.addView(hdPreviewImage);
+        hdPreviewImage.setBackground(makeRoundBg(Color.parseColor("#F8FAFC"), Color.parseColor("#CBD5E1"), dp(1), 12));
+        hdPreviewImage.setPadding(dp(8), dp(8), dp(8), dp(8));
+        previewCard.addView(hdPreviewImage);
 
         LinearLayout navRow = new LinearLayout(this);
         navRow.setOrientation(LinearLayout.HORIZONTAL);
-        navRow.addView(makeBtn("Prev Page", v -> renderPdfPage(currentPageIndex - 1)));
-        navRow.addView(makeBtn("Next Page", v -> renderPdfPage(currentPageIndex + 1)));
-        main.addView(navRow);
+        navRow.setPadding(0, dp(10), 0, 0);
+        navRow.addView(makeTileBtn("◀ Prev Page", "#F1F5F9", "#0F172A", v -> renderPdfPage(currentPageIndex - 1)));
+        addSpace(navRow, 8);
+        navRow.addView(makeTileBtn("Next Page ▶", "#F1F5F9", "#0F172A", v -> renderPdfPage(currentPageIndex + 1)));
+        previewCard.addView(navRow);
+        rootContainer.addView(previewCard);
 
-        main.addView(makeLabel("1. Paper Size:"));
-        paperSizeSpinner = makeSpinner(new String[]{
+        // 5. PAPER SIZE, QUALITY & LAYOUT SETTINGS CARD
+        LinearLayout settingsCard = makeWhiteCard();
+        settingsCard.addView(makeSectionTitle("⚙️ Paper & Print Settings"));
+
+        settingsCard.addView(makeFieldLabel("Paper Size:"));
+        paperSizeSpinner = makeStyledSpinner(new String[]{
                 "A4 (210 x 297 mm)",
                 "Custom Glossy (25 x 21 cm)",
                 "Ruled/Punched Sheet (22 x 28 cm)",
@@ -201,490 +321,150 @@ public class MainActivity extends AppCompatActivity {
                 "A5 (148 x 210 mm)",
                 "Legal (8.5 x 14 in)"
         });
-        main.addView(paperSizeSpinner);
+        settingsCard.addView(paperSizeSpinner);
 
-        main.addView(makeLabel("2. Paper Type & Print Quality:"));
-        mediaQualitySpinner = makeSpinner(new String[]{
+        settingsCard.addView(makeFieldLabel("Paper Type & Quality:"));
+        mediaQualitySpinner = makeStyledSpinner(new String[]{
                 "Plain Paper - Normal",
                 "Plain Paper - Draft (Ink Saver)",
                 "Glossy Photo Paper (180-300 GSM - Best)",
                 "Matte Brochure Paper",
                 "Heavy Cardstock (200 GSM)"
         });
-        main.addView(mediaQualitySpinner);
+        settingsCard.addView(mediaQualitySpinner);
 
-        main.addView(makeLabel("3. Size, Scaling & Margins:"));
-        scalingSpinner = makeSpinner(new String[]{"Scale to fit", "Fill page (Borderless)", "Actual size (100%)"});
-        main.addView(scalingSpinner);
+        settingsCard.addView(makeFieldLabel("Page Scaling:"));
+        scalingSpinner = makeStyledSpinner(new String[]{"Scale to fit", "Fill page (Borderless)", "Actual size (100%)"});
+        settingsCard.addView(scalingSpinner);
 
-        marginSpinner = makeSpinner(new String[]{
+        settingsCard.addView(makeFieldLabel("Margins:"));
+        marginSpinner = makeStyledSpinner(new String[]{
                 "By printable area (3mm)",
                 "Borderless (0mm)",
                 "Punched Holes Left Margin (18mm)"
         });
-        main.addView(marginSpinner);
+        settingsCard.addView(marginSpinner);
 
-        main.addView(makeLabel("4. Double-Sided Printing (Manual Duplex):"));
-        duplexSpinner = makeSpinner(new String[]{
+        settingsCard.addView(makeFieldLabel("Double-Sided Printing (Manual Duplex):"));
+        duplexSpinner = makeStyledSpinner(new String[]{
                 "One side only",
                 "Manually - Step 1: Print Odd Pages (1,3,5...)",
                 "Manually - Step 2: Print Even Pages (Reverse)"
         });
-        main.addView(duplexSpinner);
+        settingsCard.addView(duplexSpinner);
 
-        main.addView(makeLabel("5. Multi-Page Layout:"));
-        multiPageSpinner = makeSpinner(new String[]{
+        settingsCard.addView(makeFieldLabel("Multi-Page Layout:"));
+        multiPageSpinner = makeStyledSpinner(new String[]{
                 "Singly (1 page per sheet)",
                 "Multiple: 2-in-1 (2 pages per sheet)",
                 "Multiple: 4-in-1 (4 pages per sheet)",
                 "Poster (Split 1 page into 2x2 sheets)"
         });
-        main.addView(multiPageSpinner);
+        settingsCard.addView(multiPageSpinner);
 
-        main.addView(makeLabel("6. Pages & Order:"));
-        pageRangeSpinner = makeSpinner(new String[]{"All Pages", "Current Page Only", "Odd Pages Only", "Even Pages Only"});
-        main.addView(pageRangeSpinner);
+        settingsCard.addView(makeFieldLabel("Pages & Order:"));
+        pageRangeSpinner = makeStyledSpinner(new String[]{"All Pages", "Current Page Only", "Odd Pages Only", "Even Pages Only"});
+        settingsCard.addView(pageRangeSpinner);
 
         reverseOrderCheck = new CheckBox(this);
         reverseOrderCheck.setText("Print in reverse order (Last page first)");
-        main.addView(reverseOrderCheck);
+        reverseOrderCheck.setTextColor(Color.parseColor("#0F172A"));
+        reverseOrderCheck.setTextSize(14);
+        reverseOrderCheck.setPadding(dp(4), dp(12), dp(4), dp(4));
+        reverseOrderCheck.setButtonTintList(ColorStateList.valueOf(Color.parseColor("#0077C8")));
+        settingsCard.addView(reverseOrderCheck);
 
+        rootContainer.addView(settingsCard);
+
+        // 6. PRIMARY GLOWING PRINT CTA BUTTON
         Button printNowBtn = new Button(this);
-        printNowBtn.setText("PRINT NOW");
+        printNowBtn.setText("🖨️  PRINT NOW");
+        printNowBtn.setAllCaps(false);
         printNowBtn.setTextSize(17);
+        printNowBtn.setTypeface(null, Typeface.BOLD);
         printNowBtn.setTextColor(Color.WHITE);
-        printNowBtn.setBackgroundColor(Color.parseColor("#0077C8"));
-        printNowBtn.setPadding(24, 28, 24, 28);
+        printNowBtn.setBackground(makeGradientBg(Color.parseColor("#0077C8"), Color.parseColor("#005A9E"), 16));
+        printNowBtn.setElevation(dp(6));
+        LinearLayout.LayoutParams ctaParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56));
+        ctaParams.setMargins(0, dp(12), 0, dp(12));
+        printNowBtn.setLayoutParams(ctaParams);
+        attachBounce(printNowBtn);
         printNowBtn.setOnClickListener(v -> executeProPrint());
-        main.addView(printNowBtn);
+        rootContainer.addView(printNowBtn);
 
         setContentView(rootScroll);
     }
 
-    private void switchConnectionMode(String mode) {
-        connectionMode = mode;
-        if (mode.equals("Wi-Fi Direct")) {
-            printerIp = "192.168.223.1";
-            statusBanner.setText("Mode: Wi-Fi Direct (IP: 192.168.223.1) - Connect phone Wi-Fi to HP Direct");
-        } else if (mode.equals("USB OTG")) {
-            checkUsbPrinter();
-        } else {
-            statusBanner.setText("Mode: Home Wi-Fi - Ensure HP Print Service Plugin is ON");
-        }
+    private LinearLayout makeWhiteCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(makeRoundBg(Color.WHITE, Color.parseColor("#E2E8F0"), dp(1), 18));
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setElevation(dp(2));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(12), 0, 0);
+        card.setLayoutParams(lp);
+        return card;
     }
 
-    private void checkUsbPrinter() {
-        UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-        if (usbManager != null) {
-            HashMap<String, UsbDevice> devices = usbManager.getDeviceList();
-            for (UsbDevice d : devices.values()) {
-                if (d.getVendorId() == 1008 || d.getDeviceClass() == 7) {
-                    statusBanner.setText("USB OTG Connected: " + d.getProductName() + " (Ready)");
-                    return;
-                }
-            }
-        }
-        if (connectionMode.equals("USB OTG")) {
-            statusBanner.setText("USB OTG: Connect USB-B to Type-C cable to HP Smart Tank 589");
-        }
-    }
-
-    private void handleSelectedUri(Uri uri) {
-        try {
-            String mime = getContentResolver().getType(uri);
-            if (mime != null && mime.contains("pdf")) {
-                closePdf();
-                pdfDescriptor = getContentResolver().openFileDescriptor(uri, "r");
-                if (pdfDescriptor == null) return;
-                pdfRenderer = new PdfRenderer(pdfDescriptor);
-                totalPdfPages = pdfRenderer.getPageCount();
-                currentPageIndex = 0;
-                renderPdfPage(0);
-
-                if (pickingPdfForIdFront || pickingPdfForIdBack) {
-                    openPdfIdCropper();
-                }
-            } else {
-                Bitmap bmp;
-                try (InputStream is = getContentResolver().openInputStream(uri)) {
-                    bmp = BitmapFactory.decodeStream(is);
-                }
-                if (bmp == null) {
-                    Toast.makeText(this, "Could not decode image", Toast.LENGTH_SHORT).show();
-                    return;
-                }
-                if (pickingPdfForIdFront) {
-                    idFrontBitmap = bmp;
-                    pickingPdfForIdFront = false;
-                    combineAndPreviewIdCard();
-                } else if (pickingPdfForIdBack) {
-                    idBackBitmap = bmp;
-                    pickingPdfForIdBack = false;
-                    combineAndPreviewIdCard();
-                } else {
-                    closePdf();
-                    totalPdfPages = 1;
-                    currentPreviewBitmap = bmp;
-                    hdPreviewImage.setImageBitmap(bmp);
-                    pageCounterText.setText("Photo Loaded (HD Preview)");
-                }
-            }
-        } catch (Exception e) {
-            Toast.makeText(this, "Error loading file: " + e.getMessage(), Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void renderPdfPage(int index) {
-        if (pdfRenderer == null || index < 0 || index >= totalPdfPages) return;
-        currentPageIndex = index;
-        PdfRenderer.Page page = pdfRenderer.openPage(index);
-        int w = (int) (page.getWidth() * 2.5f);
-        int h = (int) (page.getHeight() * 2.5f);
-        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        bmp.eraseColor(Color.WHITE);
-        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT);
-        page.close();
-
-        currentPreviewBitmap = bmp;
-        hdPreviewImage.setImageBitmap(bmp);
-        pageCounterText.setText("PDF HD Preview - Page " + (index + 1) + " of " + totalPdfPages);
-    }
-
-    private void showIdCardDialog() {
-        String[] options = {
-                "1. Extract Front Side from PDF / Photo",
-                "2. Extract Back Side from PDF / Photo",
-                "3. Generate 2-in-1 ID Sheet Preview"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("PDF & Photo ID Card Extractor")
-                .setItems(options, (d, which) -> {
-                    if (which == 0) {
-                        pickingPdfForIdFront = true;
-                        pickingPdfForIdBack = false;
-                        filePicker.launch(new String[]{"application/pdf", "image/*"});
-                    } else if (which == 1) {
-                        pickingPdfForIdBack = true;
-                        pickingPdfForIdFront = false;
-                        filePicker.launch(new String[]{"application/pdf", "image/*"});
-                    } else {
-                        combineAndPreviewIdCard();
-                    }
-                }).show();
-    }
-
-    private void openPdfIdCropper() {
-        if (currentPreviewBitmap == null) return;
-        String[] cropPresets = {
-                "Top Half of Page (e-Aadhaar / PAN Top)",
-                "Bottom Half of Page (e-Aadhaar Cutout)",
-                "Center Card Area (Smart Card Crop)",
-                "Full Page As-Is"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("Select ID Card Area from PDF Page " + (currentPageIndex + 1))
-                .setItems(cropPresets, (d, which) -> {
-                    int w = currentPreviewBitmap.getWidth();
-                    int h = currentPreviewBitmap.getHeight();
-                    Bitmap cropped;
-                    if (which == 0) cropped = Bitmap.createBitmap(currentPreviewBitmap, 0, 0, w, h / 2);
-                    else if (which == 1) cropped = Bitmap.createBitmap(currentPreviewBitmap, 0, h / 2, w, h / 2);
-                    else if (which == 2) cropped = Bitmap.createBitmap(currentPreviewBitmap, w / 8, h / 4, (w * 3) / 4, h / 2);
-                    else cropped = currentPreviewBitmap;
-
-                    if (pickingPdfForIdFront) {
-                        idFrontBitmap = cropped;
-                        pickingPdfForIdFront = false;
-                        Toast.makeText(this, "Front ID Extracted!", Toast.LENGTH_SHORT).show();
-                    } else if (pickingPdfForIdBack) {
-                        idBackBitmap = cropped;
-                        pickingPdfForIdBack = false;
-                        Toast.makeText(this, "Back ID Extracted!", Toast.LENGTH_SHORT).show();
-                    }
-                    combineAndPreviewIdCard();
-                }).show();
-    }
-
-    private void combineAndPreviewIdCard() {
-        Bitmap sheet = Bitmap.createBitmap(1240, 1754, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(sheet);
-        c.drawColor(Color.WHITE);
-        Paint border = new Paint();
-        border.setStyle(Paint.Style.STROKE);
-        border.setColor(Color.LTGRAY);
-        border.setStrokeWidth(3);
-
-        Rect frontRect = new Rect(180, 160, 1060, 720);
-        Rect backRect = new Rect(180, 820, 1060, 1380);
-        c.drawRect(frontRect, border);
-        c.drawRect(backRect, border);
-
-        if (idFrontBitmap != null) drawFittedBitmap(c, idFrontBitmap, frontRect, 0);
-        if (idBackBitmap != null) drawFittedBitmap(c, idBackBitmap, backRect, 0);
-
-        closePdf();
-        totalPdfPages = 1;
-        currentPreviewBitmap = sheet;
-        hdPreviewImage.setImageBitmap(sheet);
-        pageCounterText.setText("2-in-1 ID Card Sheet Ready (Front + Back)");
-    }
-
-    private Bitmap applyScanEnhancement(Bitmap src) {
-        Bitmap out = Bitmap.createBitmap(src.getWidth(), src.getHeight(), Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(out);
-        Paint p = new Paint();
-        ColorMatrix cm = new ColorMatrix();
-        cm.setSaturation(0);
-        float contrast = 1.6f;
-        float translate = (-0.5f * contrast + 0.5f) * 255f;
-        cm.postConcat(new ColorMatrix(new float[]{
-                contrast, 0, 0, 0, translate,
-                0, contrast, 0, 0, translate,
-                0, 0, contrast, 0, translate,
-                0, 0, 0, 1, 0
-        }));
-        p.setColorFilter(new ColorMatrixColorFilter(cm));
-        c.drawBitmap(src, 0, 0, p);
-        return out;
-    }
-
-    private void executeProPrint() {
-        if (currentPreviewBitmap == null && pdfRenderer == null) {
-            Toast.makeText(this, "Please select a PDF or Photo first!", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        int duplexPos = duplexSpinner.getSelectedItemPosition();
-        if (duplexPos == 1) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Manual Duplex - Step 1 (Odd Pages)")
-                    .setMessage("Printing Odd pages (1, 3, 5...). After printing finishes, flip the stack face-down with top edge going in first, then select Step 2 (Even Pages).")
-                    .setPositiveButton("Start Odd Print", (d, w) -> startAndroidPrintJob(true, false))
-                    .show();
-        } else if (duplexPos == 2) {
-            startAndroidPrintJob(false, true);
-        } else {
-            startAndroidPrintJob(false, false);
-        }
-    }
-
-    private Bitmap getPageBitmap(int pageIdx) {
-        if (pdfRenderer != null) {
-            PdfRenderer.Page p = pdfRenderer.openPage(pageIdx);
-            Bitmap bmp = Bitmap.createBitmap(p.getWidth() * 2, p.getHeight() * 2, Bitmap.Config.ARGB_8888);
-            bmp.eraseColor(Color.WHITE);
-            p.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT);
-            p.close();
-            return bmp;
-        }
-        return currentPreviewBitmap;
-    }
-
-    private void drawFittedBitmap(Canvas canvas, Bitmap bmp, Rect box, int scalingMode) {
-        if (bmp == null) return;
-        if (scalingMode == 1) {
-            canvas.drawBitmap(bmp, null, box, null);
-            return;
-        }
-        float bw = bmp.getWidth();
-        float bh = bmp.getHeight();
-        float boxW = box.width();
-        float boxH = box.height();
-        float scale = (scalingMode == 2) ? 1.0f : Math.min(boxW / bw, boxH / bh);
-        int dw = Math.min(box.width(), (int) (bw * scale));
-        int dh = Math.min(box.height(), (int) (bh * scale));
-        int left = box.left + (box.width() - dw) / 2;
-        int top = box.top + (box.height() - dh) / 2;
-        canvas.drawBitmap(bmp, null, new Rect(left, top, left + dw, top + dh), null);
-    }
-
-    private void startAndroidPrintJob(boolean onlyOdd, boolean onlyEven) {
-        PrintManager printManager = (PrintManager) getSystemService(Context.PRINT_SERVICE);
-        if (printManager == null) return;
-        PrintAttributes.Builder attr = new PrintAttributes.Builder();
-
-        int sizePos = paperSizeSpinner.getSelectedItemPosition();
-        if (sizePos == 1) attr.setMediaSize(new PrintAttributes.MediaSize("CUSTOM_25X21", "25x21cm Glossy", 9842, 8267));
-        else if (sizePos == 2) attr.setMediaSize(new PrintAttributes.MediaSize("CUSTOM_22X28", "22x28cm Ruled", 8661, 11023));
-        else if (sizePos == 3) attr.setMediaSize(PrintAttributes.MediaSize.NA_INDEX_4X6);
-        else if (sizePos == 4) attr.setMediaSize(new PrintAttributes.MediaSize("PHOTO_5X7", "5x7 in", 5000, 7000));
-        else if (sizePos == 5) attr.setMediaSize(PrintAttributes.MediaSize.ISO_A5);
-        else if (sizePos == 6) attr.setMediaSize(PrintAttributes.MediaSize.NA_LEGAL);
-        else attr.setMediaSize(PrintAttributes.MediaSize.ISO_A4);
-
-        int qualPos = mediaQualitySpinner.getSelectedItemPosition();
-        if (qualPos == 2) attr.setResolution(new PrintAttributes.Resolution("HP_BEST", "Photo Best", 1200, 1200));
-        else if (qualPos == 1) attr.setResolution(new PrintAttributes.Resolution("HP_DRAFT", "Draft", 300, 300));
-        else attr.setResolution(new PrintAttributes.Resolution("HP_NORM", "Normal", 600, 600));
-
-        final int multiMode = multiPageSpinner.getSelectedItemPosition();
-        final int scalingMode = scalingSpinner.getSelectedItemPosition();
-        final int marginMode = marginSpinner.getSelectedItemPosition();
-
-        printManager.print("SmartTank589_Job", new PrintDocumentAdapter() {
-            final List<Integer> pagesToPrint = new ArrayList<>();
-
-            @Override
-            public void onLayout(PrintAttributes oldA, PrintAttributes newA, CancellationSignal cancel, LayoutResultCallback cb, Bundle extras) {
-                pagesToPrint.clear();
-                int count = (pdfRenderer != null) ? totalPdfPages : 1;
-                int rangeMode = pageRangeSpinner.getSelectedItemPosition();
-
-                for (int i = 0; i < count; i++) {
-                    int pageNum = i + 1;
-                    if (onlyOdd || rangeMode == 2) {
-                        if (pageNum % 2 == 1) pagesToPrint.add(i);
-                    } else if (onlyEven || rangeMode == 3) {
-                        if (pageNum % 2 == 0) pagesToPrint.add(i);
-                    } else if (rangeMode == 1) {
-                        if (i == currentPageIndex) pagesToPrint.add(i);
-                    } else {
-                        pagesToPrint.add(i);
-                    }
-                }
-                if (reverseOrderCheck.isChecked() || onlyEven) Collections.reverse(pagesToPrint);
-
-                int sheetCount;
-                if (multiMode == 1) sheetCount = (int) Math.ceil(pagesToPrint.size() / 2.0);
-                else if (multiMode == 2) sheetCount = (int) Math.ceil(pagesToPrint.size() / 4.0);
-                else if (multiMode == 3) sheetCount = 4;
-                else sheetCount = pagesToPrint.size();
-
-                PrintDocumentInfo info = new PrintDocumentInfo.Builder("SmartTank589_Print.pdf")
-                        .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
-                        .setPageCount(Math.max(1, sheetCount))
-                        .build();
-                cb.onLayoutFinished(info, true);
-            }
-
-            @Override
-            public void onWrite(PageRange[] ranges, ParcelFileDescriptor dest, CancellationSignal cancel, WriteResultCallback cb) {
-                PdfDocument outDoc = new PdfDocument();
-                int leftM = (marginMode == 2) ? 50 : (marginMode == 1 ? 0 : 12);
-                int pad = (marginMode == 1) ? 0 : 12;
-                int pw = 595, ph = 842;
-
-                if (multiMode == 3 && !pagesToPrint.isEmpty()) {
-                    Bitmap src = getPageBitmap(pagesToPrint.get(0));
-                    if (src != null) {
-                        int hw = src.getWidth() / 2, hh = src.getHeight() / 2;
-                        Rect[] tiles = {
-                                new Rect(0, 0, hw, hh),
-                                new Rect(hw, 0, src.getWidth(), hh),
-                                new Rect(0, hh, hw, src.getHeight()),
-                                new Rect(hw, hh, src.getWidth(), src.getHeight())
-                        };
-                        for (int t = 0; t < 4; t++) {
-                            PdfDocument.Page outPage = outDoc.startPage(new PdfDocument.PageInfo.Builder(pw, ph, t + 1).create());
-                            outPage.getCanvas().drawBitmap(src, tiles[t], new Rect(leftM, pad, pw - pad, ph - pad), null);
-                            outDoc.finishPage(outPage);
-                        }
-                    }
-                } else if (multiMode == 1) {
-                    int sheetNum = 1;
-                    for (int i = 0; i < pagesToPrint.size(); i += 2) {
-                        PdfDocument.Page outPage = outDoc.startPage(new PdfDocument.PageInfo.Builder(pw, ph, sheetNum++).create());
-                        int midY = ph / 2;
-                        drawFittedBitmap(outPage.getCanvas(), getPageBitmap(pagesToPrint.get(i)), new Rect(leftM, pad, pw - pad, midY - 6), scalingMode);
-                        if (i + 1 < pagesToPrint.size()) {
-                            drawFittedBitmap(outPage.getCanvas(), getPageBitmap(pagesToPrint.get(i + 1)), new Rect(leftM, midY + 6, pw - pad, ph - pad), scalingMode);
-                        }
-                        outDoc.finishPage(outPage);
-                    }
-                } else if (multiMode == 2) {
-                    int sheetNum = 1;
-                    for (int i = 0; i < pagesToPrint.size(); i += 4) {
-                        PdfDocument.Page outPage = outDoc.startPage(new PdfDocument.PageInfo.Builder(pw, ph, sheetNum++).create());
-                        int midX = (leftM + pw - pad) / 2;
-                        int midY = ph / 2;
-                        Rect[] cells = {
-                                new Rect(leftM, pad, midX - 4, midY - 4),
-                                new Rect(midX + 4, pad, pw - pad, midY - 4),
-                                new Rect(leftM, midY + 4, midX - 4, ph - pad),
-                                new Rect(midX + 4, midY + 4, pw - pad, ph - pad)
-                        };
-                        for (int k = 0; k < 4 && (i + k) < pagesToPrint.size(); k++) {
-                            drawFittedBitmap(outPage.getCanvas(), getPageBitmap(pagesToPrint.get(i + k)), cells[k], scalingMode);
-                        }
-                        outDoc.finishPage(outPage);
-                    }
-                } else {
-                    for (int idx = 0; idx < pagesToPrint.size(); idx++) {
-                        PdfDocument.Page outPage = outDoc.startPage(new PdfDocument.PageInfo.Builder(pw, ph, idx + 1).create());
-                        drawFittedBitmap(outPage.getCanvas(), getPageBitmap(pagesToPrint.get(idx)), new Rect(leftM, pad, pw - pad, ph - pad), scalingMode);
-                        outDoc.finishPage(outPage);
-                    }
-                }
-
-                try (FileOutputStream fos = new FileOutputStream(dest.getFileDescriptor())) {
-                    outDoc.writeTo(fos);
-                    cb.onWriteFinished(new PageRange[]{PageRange.ALL_PAGES});
-                } catch (Exception e) {
-                    cb.onWriteFailed(e.getMessage());
-                } finally {
-                    outDoc.close();
-                }
-            }
-        }, attr.build());
-    }
-
-    private void openPrinterDashboard() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(16, 16, 16, 16);
-
-        LinearLayout ipBar = new LinearLayout(this);
-        ipBar.setOrientation(LinearLayout.HORIZONTAL);
-        EditText ipField = new EditText(this);
-        ipField.setText(printerIp);
-        ipField.setHint("Printer IP (e.g. 192.168.223.1)");
-        ipField.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button goBtn = new Button(this);
-        goBtn.setText("Open");
-        ipBar.addView(ipField);
-        ipBar.addView(goBtn);
-        box.addView(ipBar);
-
-        WebView wv = new WebView(this);
-        wv.getSettings().setJavaScriptEnabled(true);
-        wv.setWebViewClient(new WebViewClient());
-        wv.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 950));
-        wv.loadUrl("http://" + printerIp);
-        box.addView(wv);
-
-        goBtn.setOnClickListener(v -> {
-            printerIp = ipField.getText().toString().trim();
-            wv.loadUrl("http://" + printerIp);
-        });
-
-        new AlertDialog.Builder(this)
-                .setTitle("HP Smart Tank 589 Live Dashboard")
-                .setView(box)
-                .setPositiveButton("Close", null)
-                .show();
-    }
-
-    private Button makeBtn(String text, View.OnClickListener l) {
+    private Button makeTileBtn(String text, String bgHex, String textHex, View.OnClickListener l) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextSize(12);
-        b.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        b.setAllCaps(false);
+        b.setTextSize(13);
+        b.setTypeface(null, Typeface.BOLD);
+        b.setTextColor(Color.parseColor(textHex));
+        b.setBackground(makeRoundBg(Color.parseColor(bgHex), 0, 0, 12));
+        b.setStateListAnimator(null);
+        b.setLayoutParams(new LinearLayout.LayoutParams(0, dp(46), 1f));
+        attachBounce(b);
         b.setOnClickListener(l);
         return b;
     }
 
-    private TextView makeLabel(String text) {
+    private void addSpace(LinearLayout row, int widthDp) {
+        View space = new View(this);
+        space.setLayoutParams(new LinearLayout.LayoutParams(dp(widthDp), 1));
+        row.addView(space);
+    }
+
+    private TextView makeSectionTitle(String text) {
         TextView tv = new TextView(this);
         tv.setText(text);
+        tv.setTextSize(15);
         tv.setTypeface(null, Typeface.BOLD);
-        tv.setPadding(0, 18, 0, 4);
+        tv.setTextColor(Color.parseColor("#0F172A"));
+        tv.setPadding(0, 0, 0, dp(10));
         return tv;
     }
 
-    private Spinner makeSpinner(String[] items) {
-        Spinner s = new Spinner(this);
-        ArrayAdapter<String> a = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, items);
-        s.setAdapter(a);
-        return s;
+    private TextView makeFieldLabel(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextSize(13);
+        tv.setTypeface(null, Typeface.BOLD);
+        tv.setTextColor(Color.parseColor("#334155"));
+        tv.setPadding(0, dp(12), 0, dp(4));
+        return tv;
     }
-}
+
+    private Spinner makeStyledSpinner(String[] items) {
+        Spinner s = new Spinner(this);
+        s.setBackground(makeRoundBg(Color.parseColor("#F8FAFC"), Color.parseColor("#CBD5E1"), dp(1), 12));
+        s.setPadding(dp(10), dp(6), dp(10), dp(6));
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, items) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                TextView tv = (TextView) super.getView(position, convertView, parent);
+                tv.setTextColor(Color.parseColor("#0F172A"));
+                tv.setTextSize(14);
+                tv.setTypeface(null, Typeface.BOLD);
+                return tv;
+            }
+
+            @Override
+            public View getDropDownView(int position, View convertView, ViewGroup parent) {
+                TextView tv = (TextView) super.getDropDownView(position, convertView, parent);
+                tv.setTextColor(Color.parseColor("#0F172A"));
+                tv.setBackgroundColor(Color.WHITE);
+                tv.setPadding(dp(16), d
