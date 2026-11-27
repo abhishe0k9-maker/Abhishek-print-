@@ -507,7 +507,7 @@ public class MainActivity extends AppCompatActivity {
         if (sizePos == 1) attr.setMediaSize(new PrintAttributes.MediaSize("CUSTOM_25X21", "25x21cm Glossy", 9842, 8267));
         else if (sizePos == 2) attr.setMediaSize(new PrintAttributes.MediaSize("CUSTOM_22X28", "22x28cm Ruled", 8661, 11023));
         else if (sizePos == 3) attr.setMediaSize(PrintAttributes.MediaSize.NA_INDEX_4X6);
-        else if (sizePos == 4) attr.setMediaSize(PrintAttributes.MediaSize("PHOTO_5X7", "5x7 in", 5000, 7000));
+        else if (sizePos == 4) attr.setMediaSize(new PrintAttributes.MediaSize("PHOTO_5X7", "5x7 in", 5000, 7000));
         else if (sizePos == 5) attr.setMediaSize(PrintAttributes.MediaSize.ISO_A5);
         else if (sizePos == 6) attr.setMediaSize(PrintAttributes.MediaSize.NA_LEGAL);
         else attr.setMediaSize(PrintAttributes.MediaSize.ISO_A4);
