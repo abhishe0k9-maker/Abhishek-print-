@@ -1237,7 +1237,7 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) { Toast.makeText(this, "PDF failed: " + e.getMessage(), Toast.LENGTH_SHORT).show(); }
         finally { doc.close(); }
     }
-    private void openPrinterScannerDialog() {
+        private void openPrinterScannerDialog() {
         LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(18), dp(14), dp(18), dp(10));
         TextView hint = new TextView(this); hint.setText("HP Smart Tank 589 glass par document rakhein aur Scan Now dabayein:");
         hint.setTextColor(Color.parseColor("#0F172A")); hint.setTextSize(13); box.addView(hint);
@@ -1360,7 +1360,7 @@ public class MainActivity extends AppCompatActivity {
         EditText ipBox = new EditText(this); ipBox.setText(printerIp); ipBox.setTextColor(Color.parseColor("#0F172A"));
         if (!connMode.equals("USB OTG")) panel.addView(ipBox);
 
-        TextView progTxt = new TextView(this); progTxt.setText("Ready to send job directly to printer.");
+        TextView progTxt = new TextView(this); progTxt.setText("Ready to send 300 DPI print job.");
         progTxt.setTextColor(Color.parseColor("#0F5A9C")); progTxt.setPadding(0, dp(8), 0, dp(4));
         panel.addView(progTxt);
 
@@ -1380,10 +1380,24 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private int[] getSelectedPaperPoints() {
+        int sz = sizeSp.getSelectedItemPosition();
+        if (sz == 1) return new int[]{709, 595};  // 25x21 cm
+        if (sz == 2) return new int[]{624, 794};  // 22x28 cm
+        if (sz == 3) return new int[]{288, 432};  // 4x6 in
+        if (sz == 4) return new int[]{360, 504};  // 5x7 in
+        if (sz == 5) return new int[]{420, 595};  // A5
+        if (sz == 6) return new int[]{612, 1008}; // Legal
+        return new int[]{595, 842};               // A4
+    }
+
     private void runDirectPrintJob(int duplexStep, TextView progTxt, ProgressBar bar, AlertDialog dlg) {
         final int multi = multiSp.getSelectedItemPosition(), sc = scaleSp.getSelectedItemPosition(), mg = marginSp.getSelectedItemPosition();
         final int q = qualSp.getSelectedItemPosition(), copies = (duplexStep > 0) ? 1 : copyCount;
         final boolean rev = revCheck.isChecked(), isColor = (colorMode == 0), isLand = (orientationMode == 1);
+        final int[] pts = getSelectedPaperPoints();
+        final int ptW = isLand ? pts[1] : pts[0];
+        final int ptH = isLand ? pts[0] : pts[1];
 
         new Thread(() -> {
             try {
@@ -1399,10 +1413,12 @@ public class MainActivity extends AppCompatActivity {
                 if (rev || duplexStep == 2) Collections.reverse(list);
                 if (list.isEmpty()) throw new Exception("Selected range mein koi page nahi hai!");
 
-                uiHandler.post(() -> { progTxt.setText("Rendering edited pages..."); bar.setProgress(30); });
+                uiHandler.post(() -> { progTxt.setText("Rendering 300 DPI pages..."); bar.setProgress(30); });
                 List<Bitmap> oneSet = new ArrayList<>();
-                int sw = isLand ? 1754 : 1240, sh = isLand ? 1240 : 1754;
-                int lm = (mg == 2) ? 95 : (mg == 1 ? 0 : 24), pd = (mg == 1) ? 0 : 24;
+                int dpi = 300;
+                int sw = Math.round(ptW * dpi / 72f);
+                int sh = Math.round(ptH * dpi / 72f);
+                int lm = (mg == 2) ? 190 : (mg == 1 ? 0 : 48), pd = (mg == 1) ? 0 : 48;
 
                 if (multi == 3) {
                     Bitmap src = pageBmp(list.get(0));
@@ -1415,15 +1431,15 @@ public class MainActivity extends AppCompatActivity {
                 } else if (multi == 1) {
                     for (int i = 0; i < list.size(); i += 2) {
                         Bitmap sb = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888); Canvas c = new Canvas(sb); c.drawColor(Color.WHITE);
-                        drawFit(c, pageBmp(list.get(i)), new Rect(lm, pd, sw - pd, sh / 2 - 10), sc);
-                        if (i + 1 < list.size()) drawFit(c, pageBmp(list.get(i + 1)), new Rect(lm, sh / 2 + 10, sw - pd, sh - pd), sc);
+                        drawFit(c, pageBmp(list.get(i)), new Rect(lm, pd, sw - pd, sh / 2 - 18), sc);
+                        if (i + 1 < list.size()) drawFit(c, pageBmp(list.get(i + 1)), new Rect(lm, sh / 2 + 18, sw - pd, sh - pd), sc);
                         oneSet.add(sb);
                     }
                 } else if (multi == 2) {
                     for (int i = 0; i < list.size(); i += 4) {
                         Bitmap sb = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888); Canvas c = new Canvas(sb); c.drawColor(Color.WHITE);
                         int mx = (lm + sw - pd) / 2, my = sh / 2;
-                        Rect[] cells = {new Rect(lm, pd, mx - 8, my - 8), new Rect(mx + 8, pd, sw - pd, my - 8), new Rect(lm, my + 8, mx - 8, sh - pd), new Rect(mx + 8, my + 8, sw - pd, sh - pd)};
+                        Rect[] cells = {new Rect(lm, pd, mx - 14, my - 14), new Rect(mx + 14, pd, sw - pd, my - 14), new Rect(lm, my + 14, mx - 14, sh - pd), new Rect(mx + 14, my + 14, sw - pd, sh - pd)};
                         for (int k = 0; k < 4 && (i + k) < list.size(); k++) drawFit(c, pageBmp(list.get(i + k)), cells[k], sc);
                         oneSet.add(sb);
                     }
@@ -1437,14 +1453,18 @@ public class MainActivity extends AppCompatActivity {
                 List<Bitmap> finalSheets = new ArrayList<>();
                 for (int c = 0; c < copies; c++) finalSheets.addAll(oneSet);
 
-                uiHandler.post(() -> { progTxt.setText("Sending to HP Smart Tank 589..."); bar.setProgress(70); });
-                byte[] pwgData = buildPwgRaster(finalSheets, isColor, 150, isLand);
-                if (connMode.equals("USB OTG")) sendUsb(pwgData);
-                else sendIpp(printerIp, pwgData, isColor, (q == 2 ? 5 : (q == 1 || inkSaverOn ? 3 : 4)));
+                uiHandler.post(() -> { progTxt.setText("Building PWG-Raster stream..."); bar.setProgress(60); });
+                int qualVal = (q == 2 ? 5 : (q == 1 || inkSaverOn ? 3 : 4));
+                byte[] pwgData = buildPwgRaster(finalSheets, isColor, dpi, ptW, ptH, qualVal);
+                byte[] ippPacket = buildIppPacket(printerIp, pwgData, isColor, qualVal);
+
+                uiHandler.post(() -> { progTxt.setText("Sending to HP Smart Tank 589..."); bar.setProgress(82); });
+                if (connMode.equals("USB OTG")) sendUsb(ippPacket);
+                else sendIpp(printerIp, ippPacket);
 
                 uiHandler.post(() -> {
                     bar.setProgress(100);
-                    progTxt.setText("Printed Successfully! (" + finalSheets.size() + " sheets)");
+                    progTxt.setText("Sent to Printer! (" + finalSheets.size() + " sheets @ 300 DPI)");
                     if (duplexStep == 1) {
                         dlg.dismiss();
                         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
@@ -1455,7 +1475,7 @@ public class MainActivity extends AppCompatActivity {
                     }
                 });
             } catch (Exception e) {
-                uiHandler.post(() -> { progTxt.setText(e.getMessage()); dlg.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true); });
+                uiHandler.post(() -> { progTxt.setText("Error: " + e.getMessage()); dlg.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true); });
             }
         }).start();
     }
@@ -1464,7 +1484,7 @@ public class MainActivity extends AppCompatActivity {
         Bitmap base = rawBmp;
         if (pdfRen != null) {
             PdfRenderer.Page p = pdfRen.openPage(idx);
-            base = Bitmap.createBitmap(p.getWidth() * 2, p.getHeight() * 2, Bitmap.Config.ARGB_8888);
+            base = Bitmap.createBitmap(p.getWidth() * 3, p.getHeight() * 3, Bitmap.Config.ARGB_8888);
             base.eraseColor(Color.WHITE); p.render(base, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT); p.close();
         }
         return applyAllEdits(base);
@@ -1479,45 +1499,91 @@ public class MainActivity extends AppCompatActivity {
         c.drawBitmap(b, null, new Rect(l, t, l + dw, t + dh), null);
     }
 
-    private byte[] buildPwgRaster(List<Bitmap> pages, boolean isColor, int dpi, boolean isLand) throws IOException {
+    private void writePwgPixel(OutputStream out, int px, boolean isColor) throws IOException {
+        if (isColor) {
+            out.write((px >> 16) & 0xFF);
+            out.write((px >> 8) & 0xFF);
+            out.write(px & 0xFF);
+        } else {
+            out.write((((px >> 16) & 0xFF) * 77 + ((px >> 8) & 0xFF) * 150 + (px & 0xFF) * 29) >> 8);
+        }
+    }
+
+    private byte[] buildPwgRaster(List<Bitmap> pages, boolean isColor, int dpi, int ptW, int ptH, int qual) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(new byte[]{'R', 'a', 'S', '2'});
         for (Bitmap bmp : pages) {
             int w = bmp.getWidth(), h = bmp.getHeight();
             ByteBuffer hdr = ByteBuffer.allocate(1796).order(ByteOrder.BIG_ENDIAN);
             hdr.put("PwgRaster".getBytes(StandardCharsets.US_ASCII));
-            hdr.putInt(260, dpi); hdr.putInt(264, dpi); hdr.putInt(288, 1);
-            hdr.putInt(320, isLand ? 842 : 595); hdr.putInt(324, isLand ? 595 : 842);
-            hdr.putInt(352, w); hdr.putInt(356, h); hdr.putInt(364, 8);
-            hdr.putInt(368, isColor ? 24 : 8); hdr.putInt(372, isColor ? (w * 3) : w);
-            hdr.putInt(380, isColor ? 19 : 18); hdr.putInt(384, pages.size()); hdr.putInt(388, 1); hdr.putInt(392, 1);
+            hdr.putInt(276, dpi);                  // HWResolution X = 300
+            hdr.putInt(280, dpi);                  // HWResolution Y = 300
+            hdr.putInt(292, ptW);                  // ImagingBoundingBox right
+            hdr.putInt(296, ptH);                  // ImagingBoundingBox top
+            hdr.putInt(340, 1);                    // NumCopies
+            hdr.putInt(352, ptW);                  // PageSize width (points)
+            hdr.putInt(356, ptH);                  // PageSize height (points)
+            hdr.putInt(372, w);                    // cupsWidth (pixels)
+            hdr.putInt(376, h);                    // cupsHeight (pixels)
+            hdr.putInt(384, 8);                    // cupsBitsPerColor
+            hdr.putInt(388, isColor ? 24 : 8);     // cupsBitsPerPixel
+            hdr.putInt(392, isColor ? (w * 3) : w);// cupsBytesPerLine
+            hdr.putInt(396, 0);                    // cupsColorOrder (Chunky)
+            hdr.putInt(400, isColor ? 19 : 18);    // cupsColorSpace (19=sRGB, 18=sGray)
+            hdr.putInt(420, isColor ? 3 : 1);      // cupsNumColors
+            hdr.putInt(452, pages.size());         // TotalPageCount
+            hdr.putInt(456, 1);                    // CrossFeedTransform
+            hdr.putInt(460, 1);                    // FeedTransform
+            hdr.putInt(472, w);                    // ImageBoxRight
+            hdr.putInt(476, h);                    // ImageBoxBottom
+            hdr.putInt(480, 0x00FFFFFF);           // AlternatePrimary (White)
+            hdr.putInt(484, qual);                 // PrintQuality
             out.write(hdr.array());
 
             int[] row = new int[w];
-            byte[] line = new byte[isColor ? (w * 3) : w];
-            for (int y = 0; y < h; y++) {
+            int[] nextRow = new int[w];
+            int y = 0;
+            while (y < h) {
                 bmp.getPixels(row, 0, w, 0, y, w, 1);
-                if (isColor) {
-                    for (int x = 0; x < w; x++) {
-                        int px = row[x]; line[x * 3] = (byte)((px >> 16) & 0xFF); line[x * 3 + 1] = (byte)((px >> 8) & 0xFF); line[x * 3 + 2] = (byte)(px & 0xFF);
-                    }
-                } else {
-                    for (int x = 0; x < w; x++) {
-                        int px = row[x]; line[x] = (byte)((((px >> 16) & 0xFF) * 77 + ((px >> 8) & 0xFF) * 150 + (px & 0xFF) * 29) >> 8);
+                int repLines = 1;
+                while (y + repLines < h && repLines < 256) {
+                    bmp.getPixels(nextRow, 0, w, 0, y + repLines, w, 1);
+                    if (!Arrays.equals(row, nextRow)) break;
+                    repLines++;
+                }
+                out.write((byte) (repLines - 1));
+                int x = 0;
+                while (x < w) {
+                    int p0 = row[x];
+                    int run = 1;
+                    while (x + run < w && run < 128 && row[x + run] == p0) run++;
+                    if (run >= 2) {
+                        out.write((byte) (run - 1));
+                        writePwgPixel(out, p0, isColor);
+                        x += run;
+                    } else {
+                        int litStart = x, litLen = 1;
+                        x++;
+                        while (x < w && litLen < 128) {
+                            if (x + 1 < w && row[x] == row[x + 1]) break;
+                            litLen++; x++;
+                        }
+                        if (litLen == 1) {
+                            out.write(0x00);
+                            writePwgPixel(out, row[litStart], isColor);
+                        } else {
+                            out.write((byte) (257 - litLen));
+                            for (int k = 0; k < litLen; k++) writePwgPixel(out, row[litStart + k], isColor);
+                        }
                     }
                 }
-                out.write(0x00);
-                int pos = 0;
-                while (pos < line.length) {
-                    int chunk = Math.min(126, line.length - pos);
-                    out.write((byte)(chunk - 1)); out.write(line, pos, chunk); pos += chunk;
-                }
+                y += repLines;
             }
         }
         return out.toByteArray();
     }
 
-    private void sendIpp(String ip, byte[] pwg, boolean isColor, int qual) throws Exception {
+    private byte[] buildIppPacket(String ip, byte[] pwg, boolean isColor, int qual) throws IOException {
         ByteArrayOutputStream ipp = new ByteArrayOutputStream();
         ipp.write(new byte[]{0x01, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x01});
         ippAttr(ipp, 0x47, "attributes-charset", "utf-8".getBytes(StandardCharsets.UTF_8));
@@ -1528,12 +1594,17 @@ public class MainActivity extends AppCompatActivity {
         ipp.write(0x02);
         ippAttr(ipp, 0x44, "print-color-mode", (isColor ? "color" : "monochrome").getBytes(StandardCharsets.US_ASCII));
         ippAttr(ipp, 0x23, "print-quality", ByteBuffer.allocate(4).putInt(qual).array());
-        ipp.write(0x03); ipp.write(pwg);
+        ippAttr(ipp, 0x44, "sides", "one-sided".getBytes(StandardCharsets.US_ASCII));
+        ipp.write(0x03);
+        ipp.write(pwg);
+        return ipp.toByteArray();
+    }
 
+    private void sendIpp(String ip, byte[] ippPacket) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL("http://" + ip + ":631/ipp/print").openConnection();
-        c.setConnectTimeout(6000); c.setReadTimeout(25000); c.setRequestMethod("POST"); c.setDoOutput(true);
+        c.setConnectTimeout(6000); c.setReadTimeout(30000); c.setRequestMethod("POST"); c.setDoOutput(true);
         c.setRequestProperty("Content-Type", "application/ipp");
-        try (OutputStream os = c.getOutputStream()) { os.write(ipp.toByteArray()); }
+        try (OutputStream os = c.getOutputStream()) { os.write(ippPacket); }
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("Printer HTTP " + code + " — Check Wi-Fi & IP");
     }
@@ -1551,18 +1622,27 @@ public class MainActivity extends AppCompatActivity {
             PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent("com.abhishek.USB_PERM"), PendingIntent.FLAG_IMMUTABLE);
             um.requestPermission(usbPrinter, pi); throw new Exception("Allow USB popup & tap Start Print again!");
         }
-        UsbInterface intf = usbPrinter.getInterface(0); UsbEndpoint epOut = null;
-        for (int i = 0; i < intf.getEndpointCount(); i++) {
-            UsbEndpoint ep = intf.getEndpoint(i);
-            if (ep.getDirection() == UsbConstants.USB_DIR_OUT && ep.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) epOut = ep;
+        UsbInterface intf = null;
+        UsbEndpoint epOut = null;
+        for (int idx = 0; idx < usbPrinter.getInterfaceCount(); idx++) {
+            UsbInterface candidate = usbPrinter.getInterface(idx);
+            if (candidate.getInterfaceClass() == 7) {
+                for (int i = 0; i < candidate.getEndpointCount(); i++) {
+                    UsbEndpoint ep = candidate.getEndpoint(i);
+                    if (ep.getDirection() == UsbConstants.USB_DIR_OUT && ep.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                        intf = candidate; epOut = ep; break;
+                    }
+                }
+            }
+            if (epOut != null) break;
         }
-        if (epOut == null) throw new Exception("USB endpoint missing!");
+        if (intf == null || epOut == null) throw new Exception("USB Printer interface not found!");
         UsbDeviceConnection conn = um.openDevice(usbPrinter);
         if (conn == null || !conn.claimInterface(intf, true)) throw new Exception("Cannot open USB printer!");
         int off = 0;
         while (off < data.length) {
             int len = Math.min(16384, data.length - off);
-            int sent = conn.bulkTransfer(epOut, Arrays.copyOfRange(data, off, off + len), len, 10000);
+            int sent = conn.bulkTransfer(epOut, Arrays.copyOfRange(data, off, off + len), len, 15000);
             if (sent < 0) { conn.close(); throw new Exception("USB transfer failed!"); }
             off += sent;
         }
