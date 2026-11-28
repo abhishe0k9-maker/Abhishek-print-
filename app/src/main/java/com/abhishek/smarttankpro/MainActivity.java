@@ -42,15 +42,9 @@ public class MainActivity extends AppCompatActivity {
     private int colorMode = 0, presetMode = 0, copyCount = 1, orientationMode = 0;
     private boolean inkSaverOn = false, advancedOpen = false, editorOpen = false, darkUi = false;
 
-    // Studio Editor States
-    private int editBright = 0;      // -100 to +100
-    private int editContrast = 100;  // 50 to 200
-    private int editSat = 100;       // 0 to 200
-    private int editWarmth = 0;      // -50 to +50
-    private int bgCleanMode = 0;     // 0=Orig, 1=WhitePaper, 2=StudioWhite, 3=PassportBlue
-    private int rotationDeg = 0;
+    private int editBright = 0, editContrast = 100, editSat = 100, editWarmth = 0, bgCleanMode = 0, rotationDeg = 0;
 
-    private LinearLayout outerRoot, rootBox, stickyBar, advContentBox, editorBox, recentRowBox, thumbStripBox, idToolsRow;
+    private LinearLayout outerRoot, rootBox, stickyBar, advContentBox, editorBox, recentRowBox, thumbStripBox, idToolsRow1, idToolsRow2;
     private ScrollView mainScroll;
     private TextView statusTxt, pageTxt, badgeTxt, copyValTxt, advToggleTxt, editToggleTxt, estBadgeTxt;
     private ImageView previewImg;
@@ -114,10 +108,35 @@ public class MainActivity extends AppCompatActivity {
         refreshRecentBar();
         startAutoDiscovery();
         checkUsb();
+        handleIncomingIntent(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIncomingIntent(intent);
+    }
+
+    private void handleIncomingIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        Uri sharedUri = null;
+        if (Intent.ACTION_SEND.equals(action)) {
+            sharedUri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (sharedUri == null && intent.getClipData() != null && intent.getClipData().getItemCount() > 0) {
+                sharedUri = intent.getClipData().getItemAt(0).getUri();
+            }
+        } else if (Intent.ACTION_VIEW.equals(action)) {
+            sharedUri = intent.getData();
+        }
+        if (sharedUri != null) {
+            pickTarget = 0;
+            loadUri(sharedUri);
+            Toast.makeText(this, "File loaded in Aman Print!", Toast.LENGTH_SHORT).show();
+        }
     }
 
     @Override protected void onDestroy() { super.onDestroy(); stopAutoDiscovery(); closePdf(); }
-
     private int dp(float v) { return Math.round(v * getResources().getDisplayMetrics().density); }
     private GradientDrawable bg(int fill, int stroke, int sw, float r) {
         GradientDrawable g = new GradientDrawable(); g.setColor(fill);
@@ -181,7 +200,7 @@ public class MainActivity extends AppCompatActivity {
             c.drawLine(s * 0.3f, s * 0.5f, s / 2f, s * 0.68f, p);
             c.drawLine(s * 0.7f, s * 0.5f, s / 2f, s * 0.68f, p);
             c.drawLine(m, s - m, s - m, s - m, p);
-        } else { // Sliders / Edit icon
+        } else {
             c.drawLine(m, s * 0.32f, s - m, s * 0.32f, p);
             c.drawLine(m, s * 0.68f, s - m, s * 0.68f, p);
             c.drawCircle(s * 0.38f, s * 0.32f, dp(2), p);
@@ -225,7 +244,6 @@ public class MainActivity extends AppCompatActivity {
         mainScroll.addView(rootBox);
         outerRoot.addView(mainScroll);
 
-        // Sticky Bottom PRINT NOW Bar
         stickyBar = new LinearLayout(this);
         stickyBar.setOrientation(LinearLayout.HORIZONTAL);
         stickyBar.setGravity(Gravity.CENTER_VERTICAL);
@@ -253,7 +271,6 @@ public class MainActivity extends AppCompatActivity {
         stickyBar.addView(printBtn);
         outerRoot.addView(stickyBar);
 
-        // 1. Header Card
         LinearLayout hdr = new LinearLayout(this);
         hdr.setOrientation(LinearLayout.VERTICAL);
         hdr.setBackground(grad(Color.parseColor("#0F5A9C"), Color.parseColor("#0077C8"), 18));
@@ -314,7 +331,6 @@ public class MainActivity extends AppCompatActivity {
         rootBox.addView(hdr);
         refreshModeUi();
 
-        // 2. Quick Actions Card
         LinearLayout act = card();
         LinearLayout r1 = new LinearLayout(this);
         r1.addView(iconTile("Open File", 1, "#EFF6FF", "#1D4ED8", v -> { pickTarget = 0; picker.launch(new String[]{"application/pdf", "image/*"}); }));
@@ -340,7 +356,6 @@ public class MainActivity extends AppCompatActivity {
         act.addView(recentRowBox);
         rootBox.addView(act);
 
-        // 3. Preview + Multi-Page List + ID Auto-Tools Card
         LinearLayout pCard = card();
         LinearLayout pTop = new LinearLayout(this); pTop.setGravity(Gravity.CENTER_VERTICAL);
         pageTxt = new TextView(this);
@@ -368,7 +383,6 @@ public class MainActivity extends AppCompatActivity {
         previewImg.setOnClickListener(v -> { if (rawBmp == null && pdfRen == null) { pickTarget = 0; picker.launch(new String[]{"application/pdf", "image/*"}); } });
         pCard.addView(previewImg);
 
-        // Horizontal All-Pages Thumbnail List
         HorizontalScrollView thumbScroll = new HorizontalScrollView(this);
         thumbScroll.setHorizontalScrollBarEnabled(false);
         thumbStripBox = new LinearLayout(this);
@@ -377,17 +391,23 @@ public class MainActivity extends AppCompatActivity {
         thumbScroll.addView(thumbStripBox);
         pCard.addView(thumbScroll);
 
-        // Smart ID Quick Adjust Row (Visible when ID Card is active)
-        idToolsRow = new LinearLayout(this);
-        idToolsRow.setOrientation(LinearLayout.HORIZONTAL);
-        idToolsRow.setPadding(0, dp(8), 0, 0);
-        idToolsRow.setVisibility(View.GONE);
-        idToolsRow.addView(cleanBtn("e-Aadhaar Split", "#FEF3C7", "#92400E", v -> applyIdSplitPreset(1)));
-        gap(idToolsRow, 6);
-        idToolsRow.addView(cleanBtn("Swap F/B", "#E0F2FE", "#075985", v -> { Bitmap t = idFront; idFront = idBack; idBack = t; buildIdSheet(); }));
-        gap(idToolsRow, 6);
-        idToolsRow.addView(cleanBtn("+2nd PDF Back", "#DCFCE7", "#166534", v -> { pickTarget = 2; picker.launch(new String[]{"application/pdf", "image/*"}); }));
-        pCard.addView(idToolsRow);
+        idToolsRow1 = new LinearLayout(this);
+        idToolsRow1.setOrientation(LinearLayout.HORIZONTAL);
+        idToolsRow1.setPadding(0, dp(8), 0, 0);
+        idToolsRow1.setVisibility(View.GONE);
+        idToolsRow1.addView(cleanBtn("Side-by-Side (CKYC)", "#FEF3C7", "#92400E", v -> applyIdSplitPreset(0)));
+        gap(idToolsRow1, 8);
+        idToolsRow1.addView(cleanBtn("e-Aadhaar / e-PAN", "#E0F2FE", "#075985", v -> applyIdSplitPreset(1)));
+        pCard.addView(idToolsRow1);
+
+        idToolsRow2 = new LinearLayout(this);
+        idToolsRow2.setOrientation(LinearLayout.HORIZONTAL);
+        idToolsRow2.setPadding(0, dp(6), 0, 0);
+        idToolsRow2.setVisibility(View.GONE);
+        idToolsRow2.addView(cleanBtn("Swap Front/Back", "#F1F5F9", "#334155", v -> { Bitmap t = idFront; idFront = idBack; idBack = t; buildIdSheet(); }));
+        gap(idToolsRow2, 8);
+        idToolsRow2.addView(cleanBtn("Manual Crop / +2nd", "#DCFCE7", "#166534", v -> openIdAdjustMenu()));
+        pCard.addView(idToolsRow2);
 
         LinearLayout saveRow = new LinearLayout(this); saveRow.setPadding(0, dp(8), 0, 0);
         saveRow.addView(iconTile("Save JPG", 8, "#DCFCE7", "#166534", v -> saveCurrentAsJpg()));
@@ -395,8 +415,6 @@ public class MainActivity extends AppCompatActivity {
         saveRow.addView(iconTile("Save PDF", 8, "#DBEAFE", "#1E40AF", v -> saveCurrentAsPdf()));
         pCard.addView(saveRow);
         rootBox.addView(pCard);
-
-        // 4. Photo & Page Studio Editor Card (Brightness, Contrast, Tone, BG Change, Rotate)
         LinearLayout editCard = card();
         editToggleTxt = new TextView(this);
         editToggleTxt.setText("Photo & Page Editor (Light, Tone, BG Change)  +");
@@ -452,7 +470,7 @@ public class MainActivity extends AppCompatActivity {
 
         editCard.addView(editorBox);
         rootBox.addView(editCard);
-                // 5. Smart Presets & Essential Controls Card
+
         LinearLayout quickCard = card();
         quickCard.addView(secTitle("Quick Presets & Print Controls"));
 
@@ -550,7 +568,6 @@ public class MainActivity extends AppCompatActivity {
         quickCard.addView(oriRow);
         rootBox.addView(quickCard);
 
-        // 6. Collapsible Advanced Settings Card
         LinearLayout advCard = card();
         advToggleTxt = new TextView(this);
         advToggleTxt.setText("Advanced Settings (Paper, Duplex, 2-in-1)  +");
@@ -607,8 +624,7 @@ public class MainActivity extends AppCompatActivity {
 
     private interface SliderCb { void onVal(int v); }
     private SeekBar addEditorSlider(LinearLayout parent, String title, int max, int def, SliderCb cb) {
-        TextView tv = lbl(title + ":");
-        parent.addView(tv);
+        parent.addView(lbl(title + ":"));
         SeekBar sb = new SeekBar(this);
         sb.setMax(max); sb.setProgress(def);
         sb.setProgressTintList(ColorStateList.valueOf(Color.parseColor("#0F5A9C")));
@@ -635,9 +651,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void applyEditsToPreview() {
-        if (rawBmp != null) previewImg.setImageBitmap(applyAllEdits(rawBmp));
-    }
+    private void applyEditsToPreview() { if (rawBmp != null) previewImg.setImageBitmap(applyAllEdits(rawBmp)); }
 
     private Bitmap applyAllEdits(Bitmap src) {
         if (src == null) return null;
@@ -650,25 +664,15 @@ public class MainActivity extends AppCompatActivity {
         Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(out);
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-
         ColorMatrix cm = new ColorMatrix();
-        float sat = (colorMode != 0) ? 0f : (editSat / 100f);
-        cm.setSaturation(sat);
-
-        float con = editContrast / 100f;
-        if (colorMode == 2) con *= 1.55f;
+        cm.setSaturation((colorMode != 0) ? 0f : (editSat / 100f));
+        float con = (editContrast / 100f) * (colorMode == 2 ? 1.55f : 1f);
         float br = editBright * 1.4f;
         if (inkSaverOn) { con *= 0.85f; br += 36f; }
         float tr = (-0.5f * con + 0.5f) * 255f + br;
         float rWarm = 1f + (editWarmth > 0 ? editWarmth * 0.005f : 0f);
         float bCool = 1f + (editWarmth < 0 ? -editWarmth * 0.006f : 0f);
-
-        cm.postConcat(new ColorMatrix(new float[]{
-                con * rWarm, 0, 0, 0, tr,
-                0, con, 0, 0, tr,
-                0, 0, con * bCool, 0, tr,
-                0, 0, 0, 1, 0
-        }));
+        cm.postConcat(new ColorMatrix(new float[]{con * rWarm,0,0,0,tr, 0,con,0,0,tr, 0,0,con * bCool,0,tr, 0,0,0,1,0}));
         p.setColorFilter(new ColorMatrixColorFilter(cm));
         c.drawBitmap(working, 0, 0, p);
 
@@ -680,15 +684,14 @@ public class MainActivity extends AppCompatActivity {
             int bgg = (((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF)) / 2;
             int bbg = ((c1 & 0xFF) + (c2 & 0xFF)) / 2;
             int targetBg = (bgCleanMode == 3) ? Color.parseColor("#D6EAFF") : Color.WHITE;
-
             for (int i = 0; i < px.length; i++) {
                 int v = px[i], r = (v >> 16) & 0xFF, g = (v >> 8) & 0xFF, b = v & 0xFF;
                 if (bgCleanMode == 1) {
                     int lum = (r * 77 + g * 150 + b * 29) >> 8;
                     int dif = Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b));
                     if (lum > 182 && dif < 45) px[i] = Color.WHITE;
-                } else {
-                    if (Math.abs(r - brg) + Math.abs(g - bgg) + Math.abs(b - bbg) < 92) px[i] = targetBg;
+                } else if (Math.abs(r - brg) + Math.abs(g - bgg) + Math.abs(b - bbg) < 92) {
+                    px[i] = targetBg;
                 }
             }
             out.setPixels(px, 0, w, 0, 0, w, h);
@@ -702,14 +705,12 @@ public class MainActivity extends AppCompatActivity {
         outerRoot.setBackgroundColor(darkUi ? Color.parseColor("#0F172A") : Color.parseColor("#EEF2F6"));
         stickyBar.setBackgroundColor(darkUi ? Color.parseColor("#1E293B") : Color.WHITE);
         estBadgeTxt.setTextColor(darkUi ? Color.parseColor("#CBD5E1") : Color.parseColor("#475569"));
-        Toast.makeText(this, darkUi ? "Dark Mode On" : "Light Mode On", Toast.LENGTH_SHORT).show();
     }
 
     private void updateEstBadge() {
         int pages = (pdfRen != null) ? Math.max(1, selectedPages.size()) : 1;
         estBadgeTxt.setText(copyCount + " Copy • " + pages + " Pg\n" + (inkSaverOn ? "Ink Saver" : "Standard"));
     }
-
     private LinearLayout card() {
         LinearLayout c = new LinearLayout(this); c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(bg(Color.WHITE, Color.parseColor("#E2E8F0"), dp(1), 16));
@@ -761,7 +762,7 @@ public class MainActivity extends AppCompatActivity {
         return s;
     }
 
-        private void showEmptyHintPreview() {
+    private void showEmptyHintPreview() {
         Bitmap ph = Bitmap.createBitmap(720, 400, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(ph); c.drawColor(Color.parseColor("#F8FAFC"));
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -778,8 +779,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void applyPreset(int idx) {
         presetMode = idx; refreshPresetUi();
-        if (idx == 0) { sizeSp.setSelection(0); qualSp.setSelection(0); scaleSp.setSelection(0); setColor(0); idToolsRow.setVisibility(View.GONE); }
-        else if (idx == 1) { sizeSp.setSelection(3); qualSp.setSelection(2); scaleSp.setSelection(1); setColor(0); idToolsRow.setVisibility(View.GONE); }
+        if (idx == 0) { sizeSp.setSelection(0); qualSp.setSelection(0); scaleSp.setSelection(0); setColor(0); idToolsRow1.setVisibility(View.GONE); idToolsRow2.setVisibility(View.GONE); }
+        else if (idx == 1) { sizeSp.setSelection(3); qualSp.setSelection(2); scaleSp.setSelection(1); setColor(0); idToolsRow1.setVisibility(View.GONE); idToolsRow2.setVisibility(View.GONE); }
         else { sizeSp.setSelection(0); qualSp.setSelection(2); setColor(0); idDialog(); }
     }
 
@@ -852,7 +853,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void loadUri(Uri uri) {
         try {
-            idToolsRow.setVisibility(View.GONE);
+            idToolsRow1.setVisibility(View.GONE); idToolsRow2.setVisibility(View.GONE);
             String mime = getContentResolver().getType(uri);
             if (mime != null && mime.contains("pdf")) {
                 closePdf();
@@ -897,7 +898,6 @@ public class MainActivity extends AppCompatActivity {
             final int idx = i;
             boolean sel = selectedPages.contains(idx);
             boolean active = (idx == curPage);
-
             LinearLayout item = new LinearLayout(this);
             item.setOrientation(LinearLayout.VERTICAL); item.setGravity(Gravity.CENTER);
             item.setPadding(dp(5), dp(5), dp(5), dp(5));
@@ -941,8 +941,8 @@ public class MainActivity extends AppCompatActivity {
         sv.addView(listBox);
 
         AlertDialog dlg = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
-                .setTitle("All PDF Pages (" + totalPages + ") — Tap to Edit/Select")
-                .setView(sv).setPositiveButton("Done", (d, w) -> { syncRangeTextFromSelection(); refreshThumbStrip(); updateEstBadge(); }).create();
+                .setTitle("All PDF Pages (" + totalPages + ")").setView(sv)
+                .setPositiveButton("Done", (d, w) -> { syncRangeTextFromSelection(); refreshThumbStrip(); updateEstBadge(); }).create();
 
         for (int i = 0; i < pdfThumbs.size(); i++) {
             final int idx = i;
@@ -957,8 +957,7 @@ public class MainActivity extends AppCompatActivity {
             row.addView(iv); gap(row, 10);
 
             CheckBox cb = new CheckBox(this);
-            cb.setText("Page " + (idx + 1) + (idx == curPage ? " (Viewing)" : ""));
-            cb.setChecked(selectedPages.contains(idx));
+            cb.setText("Page " + (idx + 1)); cb.setChecked(selectedPages.contains(idx));
             cb.setTextColor(Color.parseColor("#0F172A")); cb.setTypeface(null, Typeface.BOLD);
             cb.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             cb.setOnCheckedChangeListener((b, chk) -> { if (chk) selectedPages.add(idx); else selectedPages.remove(idx); });
@@ -967,7 +966,6 @@ public class MainActivity extends AppCompatActivity {
             Button editPgBtn = cleanBtn("Edit", "#E0F2FE", "#0F5A9C", v -> { showPdfPage(idx); dlg.dismiss(); });
             editPgBtn.setLayoutParams(new LinearLayout.LayoutParams(dp(64), dp(34)));
             row.addView(editPgBtn);
-
             listBox.addView(row);
         }
         dlg.show();
@@ -980,23 +978,13 @@ public class MainActivity extends AppCompatActivity {
         Bitmap b = Bitmap.createBitmap((int)(p.getWidth() * 2.5f), (int)(p.getHeight() * 2.5f), Bitmap.Config.ARGB_8888);
         b.eraseColor(Color.WHITE); p.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT); p.close();
         rawBmp = b; applyEditsToPreview();
-        pageTxt.setText("PDF Page " + (idx + 1) + " of " + totalPages + " (Long-press thumb to toggle)");
+        pageTxt.setText("PDF Page " + (idx + 1) + " of " + totalPages + " (Long-press thumb to select)");
         refreshThumbStrip();
     }
 
-    // Smart Auto-Extract ID Card (1 PDF -> Front & Back automatically)
     private void idDialog() {
-        String[] opts = {
-                "1. Auto-Extract Front & Back (1 PDF / Photo)",
-                "2. Select 2 Separate Files (Front + Back)"
-        };
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
-                .setTitle("Smart ID Card Extractor")
-                .setItems(opts, (d, w) -> {
-                    idFront = null; idBack = null;
-                    pickTarget = 1;
-                    picker.launch(new String[]{"application/pdf", "image/*"});
-                }).show();
+        idFront = null; idBack = null; pickTarget = 1;
+        picker.launch(new String[]{"application/pdf", "image/*"});
     }
 
     private void autoExtractIdFromUri(Uri uri) {
@@ -1009,12 +997,11 @@ public class MainActivity extends AppCompatActivity {
                 PdfRenderer ren = new PdfRenderer(fd);
                 int count = ren.getPageCount();
                 if (count >= 2) {
-                    // Page 1 = Front, Page 2 = Back automatically!
                     idFront = autoTrimWhitespace(renderSinglePdfPage(ren, 0));
                     idBack = autoTrimWhitespace(renderSinglePdfPage(ren, 1));
+                    lastIdSourceBmp = idFront;
                     ren.close(); fd.close();
                     buildIdSheet();
-                    Toast.makeText(this, "Auto-extracted Front (Pg 1) & Back (Pg 2)!", Toast.LENGTH_LONG).show();
                 } else {
                     Bitmap p0 = renderSinglePdfPage(ren, 0);
                     ren.close(); fd.close();
@@ -1024,7 +1011,7 @@ public class MainActivity extends AppCompatActivity {
                 Bitmap b; try (InputStream is = getContentResolver().openInputStream(uri)) { b = BitmapFactory.decodeStream(is); }
                 if (b != null) smartSplitSingleSource(b);
             }
-        } catch (Exception e) { Toast.makeText(this, "ID Extract Error: " + e.getMessage(), Toast.LENGTH_SHORT).show(); }
+        } catch (Exception e) { Toast.makeText(this, "ID Error: " + e.getMessage(), Toast.LENGTH_SHORT).show(); }
     }
 
     private Bitmap renderSinglePdfPage(PdfRenderer ren, int idx) {
@@ -1036,29 +1023,85 @@ public class MainActivity extends AppCompatActivity {
 
     private void smartSplitSingleSource(Bitmap src) {
         lastIdSourceBmp = src;
-        int w = src.getWidth(), h = src.getHeight();
-        // Auto-detect e-Aadhaar (dense bottom 38% split left/right) vs standard Top/Bottom card
-        if (h > w * 1.25f) {
-            // Check bottom 36% left/right vs top/bottom
-            idFront = autoTrimWhitespace(Bitmap.createBitmap(src, 0, 0, w, h / 2));
-            idBack = autoTrimWhitespace(Bitmap.createBitmap(src, 0, h / 2, w, h / 2));
+        Bitmap trimmed = autoTrimWhitespace(src);
+        int w = trimmed.getWidth(), h = trimmed.getHeight();
+        if (w > h * 1.2f) {
+            // Side-by-Side cards (CKYC, Voter ID, cropped e-Aadhaar/PAN)
+            idFront = autoTrimWhitespace(Bitmap.createBitmap(trimmed, 0, 0, w / 2, h));
+            idBack = autoTrimWhitespace(Bitmap.createBitmap(trimmed, w / 2, 0, w - (w / 2), h));
         } else {
-            idFront = autoTrimWhitespace(Bitmap.createBitmap(src, 0, 0, w / 2, h));
-            idBack = autoTrimWhitespace(Bitmap.createBitmap(src, w / 2, 0, w / 2, h));
+            // Tall page: check bottom cutout (e-Aadhaar/e-PAN) vs Top/Bottom
+            int sw = src.getWidth(), sh = src.getHeight();
+            int topY = (int)(sh * 0.61f), boxH = (int)(sh * 0.35f);
+            idFront = autoTrimWhitespace(Bitmap.createBitmap(src, (int)(sw * 0.04f), topY, (int)(sw * 0.45f), boxH));
+            idBack = autoTrimWhitespace(Bitmap.createBitmap(src, (int)(sw * 0.51f), topY, (int)(sw * 0.45f), boxH));
         }
         buildIdSheet();
-        Toast.makeText(this, "Front & Back extracted! Tap 'e-Aadhaar Split' or '+2nd PDF Back' if needed.", Toast.LENGTH_LONG).show();
     }
 
     private void applyIdSplitPreset(int mode) {
-        if (lastIdSourceBmp == null) { Toast.makeText(this, "Load ID PDF first", Toast.LENGTH_SHORT).show(); return; }
-        int w = lastIdSourceBmp.getWidth(), h = lastIdSourceBmp.getHeight();
-        if (mode == 1) { // e-Aadhaar bottom cutout (left=front, right=back)
-            int topY = (int)(h * 0.62f), boxH = (int)(h * 0.34f);
-            idFront = autoTrimWhitespace(Bitmap.createBitmap(lastIdSourceBmp, (int)(w * 0.04f), topY, (int)(w * 0.45f), boxH));
-            idBack = autoTrimWhitespace(Bitmap.createBitmap(lastIdSourceBmp, (int)(w * 0.51f), topY, (int)(w * 0.45f), boxH));
-            buildIdSheet();
+        if (lastIdSourceBmp == null) return;
+        if (mode == 0) {
+            Bitmap trimmed = autoTrimWhitespace(lastIdSourceBmp);
+            int w = trimmed.getWidth(), h = trimmed.getHeight();
+            idFront = autoTrimWhitespace(Bitmap.createBitmap(trimmed, 0, 0, w / 2, h));
+            idBack = autoTrimWhitespace(Bitmap.createBitmap(trimmed, w / 2, 0, w - (w / 2), h));
+        } else {
+            int sw = lastIdSourceBmp.getWidth(), sh = lastIdSourceBmp.getHeight();
+            int topY = (int)(sh * 0.61f), boxH = (int)(sh * 0.35f);
+            idFront = autoTrimWhitespace(Bitmap.createBitmap(lastIdSourceBmp, (int)(sw * 0.04f), topY, (int)(sw * 0.45f), boxH));
+            idBack = autoTrimWhitespace(Bitmap.createBitmap(lastIdSourceBmp, (int)(sw * 0.51f), topY, (int)(sw * 0.45f), boxH));
         }
+        buildIdSheet();
+    }
+
+    private void openIdAdjustMenu() {
+        String[] opts = {"Add 2nd PDF / Photo as Back ID", "Top / Bottom Half Split", "Manual Crop Front ID", "Manual Crop Back ID"};
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert).setTitle("Adjust ID Card")
+                .setItems(opts, (d, w) -> {
+                    if (w == 0) { pickTarget = 2; picker.launch(new String[]{"application/pdf", "image/*"}); }
+                    else if (w == 1 && lastIdSourceBmp != null) {
+                        Bitmap tr = autoTrimWhitespace(lastIdSourceBmp);
+                        idFront = autoTrimWhitespace(Bitmap.createBitmap(tr, 0, 0, tr.getWidth(), tr.getHeight() / 2));
+                        idBack = autoTrimWhitespace(Bitmap.createBitmap(tr, 0, tr.getHeight() / 2, tr.getWidth(), tr.getHeight() - tr.getHeight() / 2));
+                        buildIdSheet();
+                    } else if (w == 2) openManualCropDialog(true);
+                    else if (w == 3) openManualCropDialog(false);
+                }).show();
+    }
+
+    private void openManualCropDialog(boolean isFront) {
+        if (lastIdSourceBmp == null) return;
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(16), dp(12), dp(16), dp(8));
+        ImageView cropPreview = new ImageView(this);
+        cropPreview.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(160)));
+        cropPreview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        box.addView(cropPreview);
+
+        final int[] vals = {0, 0, 100, 100}; // L, T, R, B %
+        Runnable updateCrop = () -> {
+            int w = lastIdSourceBmp.getWidth(), h = lastIdSourceBmp.getHeight();
+            int l = (w * vals[0]) / 100, t = (h * vals[1]) / 100;
+            int r = Math.max(l + 20, (w * vals[2]) / 100), b = Math.max(t + 20, (h * vals[3]) / 100);
+            cropPreview.setImageBitmap(Bitmap.createBitmap(lastIdSourceBmp, l, t, Math.min(w - l, r - l), Math.min(h - t, b - t)));
+        };
+        updateCrop.run();
+
+        addEditorSlider(box, "Left Edge %", 90, 0, v -> { vals[0] = v; updateCrop.run(); });
+        addEditorSlider(box, "Top Edge %", 90, 0, v -> { vals[1] = v; updateCrop.run(); });
+        addEditorSlider(box, "Right Edge %", 100, 100, v -> { vals[2] = v; updateCrop.run(); });
+        addEditorSlider(box, "Bottom Edge %", 100, 100, v -> { vals[3] = v; updateCrop.run(); });
+
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
+                .setTitle(isFront ? "Manual Crop — Front ID" : "Manual Crop — Back ID").setView(box)
+                .setPositiveButton("Apply", (d, w) -> {
+                    int sw = lastIdSourceBmp.getWidth(), sh = lastIdSourceBmp.getHeight();
+                    int l = (sw * vals[0]) / 100, t = (sh * vals[1]) / 100;
+                    int r = Math.max(l + 20, (sw * vals[2]) / 100), b = Math.max(t + 20, (sh * vals[3]) / 100);
+                    Bitmap res = Bitmap.createBitmap(lastIdSourceBmp, l, t, Math.min(sw - l, r - l), Math.min(sh - t, b - t));
+                    if (isFront) idFront = res; else idBack = res;
+                    buildIdSheet();
+                }).setNegativeButton("Cancel", null).show();
     }
 
     private void loadSecondIdBackUri(Uri uri) {
@@ -1076,10 +1119,9 @@ public class MainActivity extends AppCompatActivity {
                 try (InputStream is = getContentResolver().openInputStream(uri)) { b = BitmapFactory.decodeStream(is); }
             }
             if (b != null) {
-                if (lastIdSourceBmp != null) idFront = autoTrimWhitespace(lastIdSourceBmp);
+                if (idFront == null && lastIdSourceBmp != null) idFront = autoTrimWhitespace(lastIdSourceBmp);
                 idBack = autoTrimWhitespace(b);
                 buildIdSheet();
-                Toast.makeText(this, "2nd PDF/Photo added as Back ID!", Toast.LENGTH_SHORT).show();
             }
         } catch (Exception e) { Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_SHORT).show(); }
     }
@@ -1091,19 +1133,26 @@ public class MainActivity extends AppCompatActivity {
         int[] row = new int[w];
         for (int y = 0; y < h; y += 3) {
             src.getPixels(row, 0, w, 0, y, w, 1);
+            int darkCount = 0, rowMinX = w, rowMaxX = 0;
             for (int x = 0; x < w; x += 3) {
                 int px = row[x];
-                if (((px >> 16) & 0xFF) < 238 || ((px >> 8) & 0xFF) < 238 || (px & 0xFF) < 238) {
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
+                if (((px >> 16) & 0xFF) < 235 || ((px >> 8) & 0xFF) < 235 || (px & 0xFF) < 235) {
+                    darkCount++;
+                    if (x < rowMinX) rowMinX = x;
+                    if (x > rowMaxX) rowMaxX = x;
                 }
+            }
+            // Ignore tiny stray marks (< 6 dark samples)
+            if (darkCount >= 6) {
+                if (rowMinX < minX) minX = rowMinX;
+                if (rowMaxX > maxX) maxX = rowMaxX;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
             }
         }
         if (maxX <= minX || maxY <= minY) return src;
-        minX = Math.max(0, minX - 14); minY = Math.max(0, minY - 14);
-        maxX = Math.min(w - 1, maxX + 14); maxY = Math.min(h - 1, maxY + 14);
+        minX = Math.max(0, minX - 12); minY = Math.max(0, minY - 12);
+        maxX = Math.min(w - 1, maxX + 12); maxY = Math.min(h - 1, maxY + 12);
         return Bitmap.createBitmap(src, minX, minY, maxX - minX, maxY - minY);
     }
 
@@ -1114,10 +1163,10 @@ public class MainActivity extends AppCompatActivity {
         Paint txtP = new Paint(Paint.ANTI_ALIAS_FLAG); txtP.setColor(Color.parseColor("#64748B")); txtP.setTextSize(32); txtP.setTextAlign(Paint.Align.CENTER);
         Rect r1 = new Rect(180, 160, 1060, 720), r2 = new Rect(180, 820, 1060, 1380);
         c.drawRect(r1, b); c.drawRect(r2, b);
-        if (idFront != null) drawFit(c, idFront, r1, 0); else c.drawText("Front ID (Auto-extracted)", 620, 450, txtP);
-        if (idBack != null) drawFit(c, idBack, r2, 0); else c.drawText("Back ID (Tap '+2nd PDF Back' if separate)", 620, 1110, txtP);
+        if (idFront != null) drawFit(c, idFront, r1, 0); else c.drawText("Front ID", 620, 450, txtP);
+        if (idBack != null) drawFit(c, idBack, r2, 0); else c.drawText("Back ID", 620, 1110, txtP);
         closePdf(); totalPages = 1; rawBmp = sh; resetEditsOnly(); applyEditsToPreview();
-        idToolsRow.setVisibility(View.VISIBLE);
+        idToolsRow1.setVisibility(View.VISIBLE); idToolsRow2.setVisibility(View.VISIBLE);
         pageTxt.setText("2-in-1 ID Card Sheet Ready");
     }
 
@@ -1126,8 +1175,7 @@ public class MainActivity extends AppCompatActivity {
     private void buildPassportSheet(Bitmap photo) {
         String[] layouts = {"4 x 6 inch Sheet (6 Passport Photos)", "A4 Sheet (12 Passport Photos)"};
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
-                .setTitle("Passport Photo Sheet")
-                .setItems(layouts, (d, w) -> {
+                .setTitle("Passport Photo Sheet").setItems(layouts, (d, w) -> {
                     boolean is4x6 = (w == 0);
                     int sw = is4x6 ? 1200 : 1240, sh = is4x6 ? 1800 : 1754;
                     int cols = is4x6 ? 2 : 3, rows = is4x6 ? 3 : 4;
@@ -1135,14 +1183,12 @@ public class MainActivity extends AppCompatActivity {
                     Canvas c = new Canvas(sheet); c.drawColor(Color.WHITE);
                     Paint border = new Paint(); border.setStyle(Paint.Style.STROKE); border.setColor(Color.LTGRAY); border.setStrokeWidth(2);
                     int pad = 50, gap = 30;
-                    int cw = (sw - pad * 2 - gap * (cols - 1)) / cols;
-                    int ch = (sh - pad * 2 - gap * (rows - 1)) / rows;
+                    int cw = (sw - pad * 2 - gap * (cols - 1)) / cols, ch = (sh - pad * 2 - gap * (rows - 1)) / rows;
                     for (int r = 0; r < rows; r++) {
                         for (int col = 0; col < cols; col++) {
                             int l = pad + col * (cw + gap), t = pad + r * (ch + gap);
                             Rect box = new Rect(l, t, l + cw, t + ch);
-                            c.drawBitmap(photo, null, box, null);
-                            c.drawRect(box, border);
+                            c.drawBitmap(photo, null, box, null); c.drawRect(box, border);
                         }
                     }
                     if (is4x6) sizeSp.setSelection(3); else sizeSp.setSelection(0);
@@ -1191,7 +1237,6 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) { Toast.makeText(this, "PDF failed: " + e.getMessage(), Toast.LENGTH_SHORT).show(); }
         finally { doc.close(); }
     }
-
     private void openPrinterScannerDialog() {
         LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(18), dp(14), dp(18), dp(10));
         TextView hint = new TextView(this); hint.setText("HP Smart Tank 589 glass par document rakhein aur Scan Now dabayein:");
