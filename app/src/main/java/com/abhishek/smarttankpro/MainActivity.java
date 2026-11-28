@@ -11,7 +11,11 @@ import android.graphics.drawable.*;
 import android.graphics.pdf.PdfDocument;
 import android.graphics.pdf.PdfRenderer;
 import android.hardware.usb.*;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.net.http.SslError;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.os.*;
@@ -20,6 +24,8 @@ import android.text.TextUtils;
 import android.transition.AutoTransition;
 import android.transition.TransitionManager;
 import android.view.*;
+import android.webkit.SslErrorHandler;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.*;
@@ -33,9 +39,16 @@ import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 public class MainActivity extends AppCompatActivity {
     private String connMode = "Wi-Fi", printerIp = "192.168.1.100", printerName = "HP Smart Tank 589";
@@ -51,7 +64,7 @@ public class MainActivity extends AppCompatActivity {
     private EditText pageRangeEdit;
     private SeekBar sbBright, sbContrast, sbSat, sbWarmth;
     private final Button[] modeBtns = new Button[3], colorBtns = new Button[3], presetBtns = new Button[3], orientBtns = new Button[2], bgBtns = new Button[4];
-    private Button themeBtn, allPagesBtn;
+    private Button themeBtn, allPagesBtn, clearDocBtn, zoomPreviewBtn;
     private CheckBox inkSaverCheck, revCheck;
     private Spinner sizeSp, qualSp, scaleSp, marginSp, duplexSp, multiSp;
 
@@ -84,7 +97,7 @@ public class MainActivity extends AppCompatActivity {
                     Bitmap b = (Bitmap) res.getData().getExtras().get("data");
                     if (b != null) {
                         closePdf(); totalPages = 1; rawBmp = b; resetEditsOnly(); setColor(2);
-                        pageTxt.setText("Camera Scan Ready — Edit, Save or Print");
+                        updateLoadedUiState("Camera Scan Ready — Tap image to Zoom, Edit or Print");
                     }
                 }
             });
@@ -106,6 +119,7 @@ public class MainActivity extends AppCompatActivity {
         buildUi();
         showEmptyHintPreview();
         refreshRecentBar();
+        bindToWifiNetwork(true);
         startAutoDiscovery();
         checkUsb();
         handleIncomingIntent(getIntent());
@@ -136,7 +150,65 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    @Override protected void onDestroy() { super.onDestroy(); stopAutoDiscovery(); closePdf(); }
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        bindToWifiNetwork(false);
+        stopAutoDiscovery();
+        closePdf();
+    }
+
+    // Bind app sockets & WebView to Wi-Fi so Wi-Fi Direct (192.168.223.1) works even when Mobile Data 5G is ON
+    private void bindToWifiNetwork(boolean enable) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            if (!enable) {
+                cm.bindProcessToNetwork(null);
+                return;
+            }
+            for (Network net : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    cm.bindProcessToNetwork(net);
+                    return;
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // Trust self-signed HTTPS certificate of local HP Smart Tank 589 printer (192.168.x.x)
+    private SSLSocketFactory getLocalPrinterSslFactory() {
+        try {
+            TrustManager[] tm = new TrustManager[]{new X509TrustManager() {
+                @Override public void checkClientTrusted(X509Certificate[] c, String a) {}
+                @Override public void checkServerTrusted(X509Certificate[] c, String a) {}
+                @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            }};
+            SSLContext sc = SSLContext.getInstance("TLS");
+            sc.init(null, tm, new SecureRandom());
+            return sc.getSocketFactory();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private HttpURLConnection openPrinterHttp(String urlStr, String method, int connectMs, int readMs) throws IOException {
+        bindToWifiNetwork(true);
+        URL url = new URL(urlStr);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        if (conn instanceof HttpsURLConnection) {
+            HttpsURLConnection https = (HttpsURLConnection) conn;
+            SSLSocketFactory sf = getLocalPrinterSslFactory();
+            if (sf != null) https.setSSLSocketFactory(sf);
+            https.setHostnameVerifier((h, s) -> true);
+        }
+        conn.setInstanceFollowRedirects(false);
+        conn.setConnectTimeout(connectMs);
+        conn.setReadTimeout(readMs);
+        conn.setRequestMethod(method);
+        return conn;
+    }
+
     private int dp(float v) { return Math.round(v * getResources().getDisplayMetrics().density); }
     private GradientDrawable bg(int fill, int stroke, int sw, float r) {
         GradientDrawable g = new GradientDrawable(); g.setColor(fill);
@@ -158,6 +230,29 @@ public class MainActivity extends AppCompatActivity {
         pdfThumbs.clear(); selectedPages.clear();
         if (thumbStripBox != null) thumbStripBox.removeAllViews();
         if (allPagesBtn != null) allPagesBtn.setVisibility(View.GONE);
+    }
+
+    private void clearWorkspaceForNewPrint() {
+        closePdf();
+        rawBmp = null; idFront = null; idBack = null; lastIdSourceBmp = null;
+        totalPages = 0; curPage = 0; copyCount = 1;
+        if (copyValTxt != null) copyValTxt.setText("1");
+        if (pageRangeEdit != null) pageRangeEdit.setText("");
+        if (idToolsRow1 != null) idToolsRow1.setVisibility(View.GONE);
+        if (idToolsRow2 != null) idToolsRow2.setVisibility(View.GONE);
+        if (clearDocBtn != null) clearDocBtn.setVisibility(View.GONE);
+        if (zoomPreviewBtn != null) zoomPreviewBtn.setVisibility(View.GONE);
+        resetEditsOnly();
+        showEmptyHintPreview();
+        if (pageTxt != null) pageTxt.setText("फ़ाइल चुनें या प्रिंटर से स्कैन करें");
+        updateEstBadge();
+    }
+
+    private void updateLoadedUiState(String label) {
+        pageTxt.setText(label);
+        clearDocBtn.setVisibility(View.VISIBLE);
+        zoomPreviewBtn.setVisibility(View.VISIBLE);
+        updateEstBadge();
     }
 
     private Drawable makeVectorIcon(int type, int color) {
@@ -231,6 +326,82 @@ public class MainActivity extends AppCompatActivity {
         c.drawLine(36 * u, 75 * u, 56 * u, 75 * u, p);
         return b;
     }
+
+    // Pinch-to-Zoom + Pan ImageView for inspecting PDF pages and photos up close
+    private class ZoomImageView extends ImageView {
+        private final Matrix matrix = new Matrix();
+        private float currentScale = 1f;
+        private final ScaleGestureDetector scaleDetector;
+        private float lastX, lastY;
+        private boolean dragging = false;
+
+        ZoomImageView(Context ctx) {
+            super(ctx);
+            setScaleType(ScaleType.MATRIX);
+            scaleDetector = new ScaleGestureDetector(ctx, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                @Override public boolean onScale(ScaleGestureDetector d) {
+                    zoomBy(d.getScaleFactor(), d.getFocusX(), d.getFocusY());
+                    return true;
+                }
+            });
+        }
+
+        void resetZoom() {
+            Drawable d = getDrawable();
+            if (d == null || getWidth() == 0 || getHeight() == 0) return;
+            float vw = getWidth(), vh = getHeight();
+            float dw = d.getIntrinsicWidth(), dh = d.getIntrinsicHeight();
+            if (dw <= 0 || dh <= 0) return;
+            float fit = Math.min(vw / dw, vh / dh);
+            matrix.reset();
+            matrix.postScale(fit, fit);
+            matrix.postTranslate((vw - dw * fit) / 2f, (vh - dh * fit) / 2f);
+            currentScale = 1f;
+            setImageMatrix(matrix);
+        }
+
+        void zoomBy(float factor, float fx, float fy) {
+            float target = currentScale * factor;
+            if (target < 1f) factor = 1f / currentScale;
+            else if (target > 6f) factor = 6f / currentScale;
+            currentScale *= factor;
+            matrix.postScale(factor, factor, fx, fy);
+            setImageMatrix(matrix);
+        }
+
+        @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            super.onLayout(changed, l, t, r, b);
+            if (changed) resetZoom();
+        }
+
+        @Override public void setImageBitmap(Bitmap bm) {
+            super.setImageBitmap(bm);
+            post(this::resetZoom);
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent e) {
+            scaleDetector.onTouchEvent(e);
+            if (e.getPointerCount() == 1) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                        lastX = e.getX(); lastY = e.getY(); dragging = true; break;
+                    case MotionEvent.ACTION_MOVE:
+                        if (dragging && !scaleDetector.isInProgress() && currentScale > 1.02f) {
+                            matrix.postTranslate(e.getX() - lastX, e.getY() - lastY);
+                            setImageMatrix(matrix);
+                            lastX = e.getX(); lastY = e.getY();
+                        }
+                        break;
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        dragging = false; break;
+                }
+            }
+            return true;
+        }
+    }
+
     private void buildUi() {
         outerRoot = new LinearLayout(this);
         outerRoot.setOrientation(LinearLayout.VERTICAL);
@@ -347,7 +518,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout r3 = new LinearLayout(this); r3.setPadding(0, dp(8), 0, 0);
         r3.addView(iconTile("Passport Sheet", 5, "#FCE7F3", "#BE185D", v -> startPassportSheet()));
         gap(r3, 8);
-        r3.addView(iconTile("Ink & Status", 6, "#F3E8FF", "#6D28D9", v -> openInkAndDashboard()));
+        r3.addView(iconTile("Ink & Nozzle", 6, "#F3E8FF", "#6D28D9", v -> openInkAndDashboard()));
         act.addView(r3);
 
         recentRowBox = new LinearLayout(this);
@@ -356,6 +527,7 @@ public class MainActivity extends AppCompatActivity {
         act.addView(recentRowBox);
         rootBox.addView(act);
 
+        // Preview Card with Zoom Inspect + Clear/New + All Pages
         LinearLayout pCard = card();
         LinearLayout pTop = new LinearLayout(this); pTop.setGravity(Gravity.CENTER_VERTICAL);
         pageTxt = new TextView(this);
@@ -364,14 +536,17 @@ public class MainActivity extends AppCompatActivity {
         pageTxt.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         pTop.addView(pageTxt);
 
-        allPagesBtn = new Button(this);
-        allPagesBtn.setText("All Pages List"); allPagesBtn.setAllCaps(false); allPagesBtn.setTextSize(11);
-        allPagesBtn.setTypeface(null, Typeface.BOLD); allPagesBtn.setTextColor(Color.parseColor("#0F5A9C"));
-        allPagesBtn.setBackground(bg(Color.parseColor("#E0F2FE"), 0, 0, 10));
-        allPagesBtn.setPadding(dp(10), dp(4), dp(10), dp(4)); allPagesBtn.setMinHeight(0); allPagesBtn.setMinimumHeight(0);
+        zoomPreviewBtn = makeSmallChip("Zoom", "#E0F2FE", "#0F5A9C", v -> openZoomInspector(curPage));
+        zoomPreviewBtn.setVisibility(View.GONE);
+        pTop.addView(zoomPreviewBtn);
+
+        allPagesBtn = makeSmallChip("Pages", "#EFF6FF", "#1D4ED8", v -> openAllPagesListDialog());
         allPagesBtn.setVisibility(View.GONE);
-        allPagesBtn.setOnClickListener(v -> openAllPagesListDialog());
         pTop.addView(allPagesBtn);
+
+        clearDocBtn = makeSmallChip("Clear", "#FEE2E2", "#991B1B", v -> clearWorkspaceForNewPrint());
+        clearDocBtn.setVisibility(View.GONE);
+        pTop.addView(clearDocBtn);
         pCard.addView(pTop);
 
         previewImg = new ImageView(this);
@@ -380,7 +555,10 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams pvLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         pvLp.setMargins(0, dp(8), 0, 0); previewImg.setLayoutParams(pvLp);
         previewImg.setPadding(dp(8), dp(8), dp(8), dp(8));
-        previewImg.setOnClickListener(v -> { if (rawBmp == null && pdfRen == null) { pickTarget = 0; picker.launch(new String[]{"application/pdf", "image/*"}); } });
+        previewImg.setOnClickListener(v -> {
+            if (rawBmp == null && pdfRen == null) { pickTarget = 0; picker.launch(new String[]{"application/pdf", "image/*"}); }
+            else openZoomInspector(curPage);
+        });
         pCard.addView(previewImg);
 
         HorizontalScrollView thumbScroll = new HorizontalScrollView(this);
@@ -415,6 +593,8 @@ public class MainActivity extends AppCompatActivity {
         saveRow.addView(iconTile("Save PDF", 8, "#DBEAFE", "#1E40AF", v -> saveCurrentAsPdf()));
         pCard.addView(saveRow);
         rootBox.addView(pCard);
+
+        // Photo & Page Studio Editor
         LinearLayout editCard = card();
         editToggleTxt = new TextView(this);
         editToggleTxt.setText("Photo & Page Editor (Light, Tone, BG Change)  +");
@@ -471,6 +651,7 @@ public class MainActivity extends AppCompatActivity {
         editCard.addView(editorBox);
         rootBox.addView(editCard);
 
+        // Quick Presets, Color, Copies, Duplex & Orientation Card
         LinearLayout quickCard = card();
         quickCard.addView(secTitle("Quick Presets & Print Controls"));
 
@@ -506,6 +687,17 @@ public class MainActivity extends AppCompatActivity {
         }
         quickCard.addView(cBar);
         refreshColorUi();
+
+        // Duplex Right in Quick Controls (with explicit Front All & Back All options!)
+        quickCard.addView(lbl("Double-Sided / Duplex Mode:"));
+        duplexSp = spin(new String[]{
+                "One side only (Single)",
+                "Front Pages Only — All Odd (1, 3, 5...)",
+                "Back Pages Only — All Even Reverse (...6, 4, 2)",
+                "Back Pages Only — All Even Normal (2, 4, 6...)",
+                "Auto Manual Duplex (Odd -> Flip -> Even)"
+        });
+        quickCard.addView(duplexSp);
 
         LinearLayout cpRow = new LinearLayout(this); cpRow.setPadding(0, dp(10), 0, 0); cpRow.setGravity(Gravity.CENTER_VERTICAL);
         TextView cpLbl = new TextView(this); cpLbl.setText("Copies:"); cpLbl.setTextSize(13); cpLbl.setTypeface(null, Typeface.BOLD); cpLbl.setTextColor(Color.parseColor("#334155"));
@@ -568,9 +760,10 @@ public class MainActivity extends AppCompatActivity {
         quickCard.addView(oriRow);
         rootBox.addView(quickCard);
 
+        // Collapsible Advanced Settings Card
         LinearLayout advCard = card();
         advToggleTxt = new TextView(this);
-        advToggleTxt.setText("Advanced Settings (Paper, Duplex, 2-in-1)  +");
+        advToggleTxt.setText("Advanced Settings (Paper, Margins, 2-in-1)  +");
         advToggleTxt.setTextSize(14); advToggleTxt.setTypeface(null, Typeface.BOLD); advToggleTxt.setTextColor(Color.parseColor("#0F5A9C"));
         advCard.addView(advToggleTxt);
 
@@ -583,7 +776,7 @@ public class MainActivity extends AppCompatActivity {
             TransitionManager.beginDelayedTransition(rootBox, new AutoTransition().setDuration(180));
             advancedOpen = !advancedOpen;
             advContentBox.setVisibility(advancedOpen ? View.VISIBLE : View.GONE);
-            advToggleTxt.setText(advancedOpen ? "Advanced Settings (Hide)  -" : "Advanced Settings (Paper, Duplex, 2-in-1)  +");
+            advToggleTxt.setText(advancedOpen ? "Advanced Settings (Hide)  -" : "Advanced Settings (Paper, Margins, 2-in-1)  +");
         });
 
         advContentBox.addView(lbl("Paper Size:"));
@@ -602,10 +795,6 @@ public class MainActivity extends AppCompatActivity {
         marginSp = spin(new String[]{"By printable area (3mm)", "Borderless (0mm)", "Punched Left Margin (18mm)"});
         advContentBox.addView(marginSp);
 
-        advContentBox.addView(lbl("Manual Duplex (Both Sides):"));
-        duplexSp = spin(new String[]{"One side only", "Manual Duplex (Odd -> Flip -> Even)"});
-        advContentBox.addView(duplexSp);
-
         advContentBox.addView(lbl("Multi-Page Layout:"));
         multiSp = spin(new String[]{"Singly (1 page/sheet)", "Multiple: 2-in-1", "Multiple: 4-in-1", "Poster (2x2 A4 Split)"});
         advContentBox.addView(multiSp);
@@ -620,6 +809,17 @@ public class MainActivity extends AppCompatActivity {
         advCard.addView(advContentBox);
         rootBox.addView(advCard);
         setContentView(outerRoot);
+    }
+
+    private Button makeSmallChip(String text, String bgHex, String fgHex, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(text); b.setAllCaps(false); b.setSingleLine(true); b.setTextSize(11); b.setTypeface(null, Typeface.BOLD);
+        b.setTextColor(Color.parseColor(fgHex)); b.setBackground(bg(Color.parseColor(bgHex), 0, 0, 9));
+        b.setPadding(dp(8), dp(4), dp(8), dp(4)); b.setMinHeight(0); b.setMinimumHeight(0); b.setMinWidth(0); b.setMinimumWidth(0);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(28));
+        lp.setMargins(dp(5), 0, 0, 0); b.setLayoutParams(lp);
+        b.setOnClickListener(l);
+        return b;
     }
 
     private interface SliderCb { void onVal(int v); }
@@ -711,6 +911,7 @@ public class MainActivity extends AppCompatActivity {
         int pages = (pdfRen != null) ? Math.max(1, selectedPages.size()) : 1;
         estBadgeTxt.setText(copyCount + " Copy • " + pages + " Pg\n" + (inkSaverOn ? "Ink Saver" : "Standard"));
     }
+
     private LinearLayout card() {
         LinearLayout c = new LinearLayout(this); c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(bg(Color.WHITE, Color.parseColor("#E2E8F0"), dp(1), 16));
@@ -763,17 +964,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showEmptyHintPreview() {
-        Bitmap ph = Bitmap.createBitmap(720, 400, Bitmap.Config.ARGB_8888);
+        Bitmap ph = Bitmap.createBitmap(720, 380, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(ph); c.drawColor(Color.parseColor("#F8FAFC"));
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.STROKE); p.setColor(Color.parseColor("#94A3B8")); p.setStrokeWidth(3);
         p.setPathEffect(new DashPathEffect(new float[]{14, 10}, 0));
-        c.drawRoundRect(30, 30, 690, 370, 24, 24, p);
+        c.drawRoundRect(30, 30, 690, 350, 24, 24, p);
         p.setPathEffect(null); p.setStyle(Paint.Style.FILL); p.setColor(Color.parseColor("#475569"));
         p.setTextAlign(Paint.Align.CENTER); p.setTextSize(28);
-        c.drawText("फ़ाइल चुनें या प्रिंटर से स्कैन करें", 360, 190, p);
+        c.drawText("फ़ाइल चुनें या प्रिंटर से स्कैन करें", 360, 180, p);
         p.setTextSize(20); p.setColor(Color.parseColor("#64748B"));
-        c.drawText("Open File • Printer Scan • Camera • Auto ID Card", 360, 235, p);
+        c.drawText("Open File • Printer Scan • Passport • ID Card", 360, 225, p);
         previewImg.setImageBitmap(ph);
     }
 
@@ -803,9 +1004,17 @@ public class MainActivity extends AppCompatActivity {
     private void setMode(String m) {
         TransitionManager.beginDelayedTransition(rootBox, new AutoTransition().setDuration(160));
         connMode = m; badgeTxt.setText(m); refreshModeUi();
-        if (m.equals("Wi-Fi Direct")) { printerIp = "192.168.223.1"; statusTxt.setText("Wi-Fi Direct IP: 192.168.223.1 (Tap to edit)"); }
-        else if (m.equals("USB OTG")) checkUsb();
-        else statusTxt.setText("Home Wi-Fi: " + printerName + " (" + printerIp + ")");
+        if (m.equals("Wi-Fi Direct")) {
+            bindToWifiNetwork(true);
+            printerIp = "192.168.223.1";
+            statusTxt.setText("Wi-Fi Direct IP: 192.168.223.1 (Tap to edit)");
+        } else if (m.equals("USB OTG")) {
+            bindToWifiNetwork(false);
+            checkUsb();
+        } else {
+            bindToWifiNetwork(true);
+            statusTxt.setText("Home Wi-Fi: " + printerName + " (" + printerIp + ")");
+        }
     }
 
     private void refreshModeUi() {
@@ -863,17 +1072,16 @@ public class MainActivity extends AppCompatActivity {
                 totalPages = pdfRen.getPageCount();
                 for (int i = 0; i < totalPages; i++) selectedPages.add(i);
                 allPagesBtn.setVisibility(View.VISIBLE);
-                allPagesBtn.setText("All Pages (" + totalPages + ")");
+                allPagesBtn.setText("Pages (" + totalPages + ")");
                 showPdfPage(0);
                 buildPdfThumbnails();
-                updateEstBadge();
+                updateLoadedUiState("PDF Page 1/" + totalPages + " — Tap preview to Zoom");
             } else {
                 Bitmap b; try (InputStream is = getContentResolver().openInputStream(uri)) { b = BitmapFactory.decodeStream(is); }
                 if (b == null) return;
-                if (pickTarget == 3) { pickTarget = 0; buildPassportSheet(b); return; }
+                if (pickTarget == 3) { pickTarget = 0; openPassportCustomDialog(b); return; }
                 closePdf(); totalPages = 1; rawBmp = b; resetEditsOnly(); applyEditsToPreview();
-                pageTxt.setText("Photo Loaded — Tap 'Photo & Page Editor' to adjust");
-                updateEstBadge();
+                updateLoadedUiState("Photo Loaded — Tap preview to Zoom");
             }
         } catch (Exception e) { Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_SHORT).show(); }
     }
@@ -934,6 +1142,68 @@ public class MainActivity extends AppCompatActivity {
         pageRangeEdit.setText(TextUtils.join(",", nums));
     }
 
+    // Full-Screen HD Pinch-to-Zoom Inspector for checking every page in detail
+    private void openZoomInspector(int startIdx) {
+        if (rawBmp == null && pdfRen == null) return;
+        final int[] viewIdx = {Math.max(0, startIdx)};
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackgroundColor(Color.parseColor("#0F172A"));
+        box.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+        TextView head = new TextView(this);
+        head.setTextColor(Color.WHITE); head.setTextSize(14); head.setTypeface(null, Typeface.BOLD);
+        head.setGravity(Gravity.CENTER); head.setPadding(0, dp(4), 0, dp(8));
+        box.addView(head);
+
+        ZoomImageView zoomView = new ZoomImageView(this);
+        zoomView.setBackgroundColor(Color.parseColor("#1E293B"));
+        zoomView.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
+        box.addView(zoomView);
+
+        CheckBox includeCb = new CheckBox(this);
+        includeCb.setText("Include this page in Print");
+        includeCb.setTextColor(Color.WHITE);
+        includeCb.setButtonTintList(ColorStateList.valueOf(Color.parseColor("#38BDF8")));
+        if (pdfRen != null) box.addView(includeCb);
+
+        Runnable loadInspectPage = () -> {
+            if (pdfRen != null) {
+                showPdfPage(viewIdx[0]);
+                head.setText("Page " + (viewIdx[0] + 1) + " of " + totalPages + " — Pinch or use +/- to Zoom");
+                includeCb.setOnCheckedChangeListener(null);
+                includeCb.setChecked(selectedPages.contains(viewIdx[0]));
+                includeCb.setOnCheckedChangeListener((b, chk) -> {
+                    if (chk) selectedPages.add(viewIdx[0]); else selectedPages.remove(viewIdx[0]);
+                    syncRangeTextFromSelection(); refreshThumbStrip(); updateEstBadge();
+                });
+            } else {
+                head.setText("HD Zoom Inspector — Pinch or use +/- to Zoom");
+            }
+            zoomView.setImageBitmap(applyAllEdits(rawBmp));
+        };
+        loadInspectPage.run();
+
+        LinearLayout zoomBtns = new LinearLayout(this); zoomBtns.setPadding(0, dp(8), 0, 0);
+        zoomBtns.addView(cleanBtn("Zoom -", "#334155", "#FFFFFF", v -> zoomView.zoomBy(0.75f, zoomView.getWidth() / 2f, zoomView.getHeight() / 2f)));
+        gap(zoomBtns, 6);
+        zoomBtns.addView(cleanBtn("Reset 100%", "#334155", "#FFFFFF", v -> zoomView.resetZoom()));
+        gap(zoomBtns, 6);
+        zoomBtns.addView(cleanBtn("Zoom +", "#0077C8", "#FFFFFF", v -> zoomView.zoomBy(1.4f, zoomView.getWidth() / 2f, zoomView.getHeight() / 2f)));
+        box.addView(zoomBtns);
+
+        if (pdfRen != null && totalPages > 1) {
+            LinearLayout navBtns = new LinearLayout(this); navBtns.setPadding(0, dp(6), 0, 0);
+            navBtns.addView(cleanBtn("◀ Prev Page", "#1E293B", "#E2E8F0", v -> { if (viewIdx[0] > 0) { viewIdx[0]--; loadInspectPage.run(); } }));
+            gap(navBtns, 8);
+            navBtns.addView(cleanBtn("Next Page ▶", "#1E293B", "#E2E8F0", v -> { if (viewIdx[0] < totalPages - 1) { viewIdx[0]++; loadInspectPage.run(); } }));
+            box.addView(navBtns);
+        }
+
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
+                .setView(box).setPositiveButton("Close", null).show();
+    }
+
     private void openAllPagesListDialog() {
         if (pdfThumbs.isEmpty()) return;
         ScrollView sv = new ScrollView(this);
@@ -941,7 +1211,7 @@ public class MainActivity extends AppCompatActivity {
         sv.addView(listBox);
 
         AlertDialog dlg = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
-                .setTitle("All PDF Pages (" + totalPages + ")").setView(sv)
+                .setTitle("All PDF Pages (" + totalPages + ") — Tap Zoom to Inspect").setView(sv)
                 .setPositiveButton("Done", (d, w) -> { syncRangeTextFromSelection(); refreshThumbStrip(); updateEstBadge(); }).create();
 
         for (int i = 0; i < pdfThumbs.size(); i++) {
@@ -954,6 +1224,7 @@ public class MainActivity extends AppCompatActivity {
 
             ImageView iv = new ImageView(this); iv.setImageBitmap(pdfThumbs.get(idx));
             iv.setLayoutParams(new LinearLayout.LayoutParams(dp(56), dp(76)));
+            iv.setOnClickListener(v -> { dlg.dismiss(); openZoomInspector(idx); });
             row.addView(iv); gap(row, 10);
 
             CheckBox cb = new CheckBox(this);
@@ -963,9 +1234,9 @@ public class MainActivity extends AppCompatActivity {
             cb.setOnCheckedChangeListener((b, chk) -> { if (chk) selectedPages.add(idx); else selectedPages.remove(idx); });
             row.addView(cb);
 
-            Button editPgBtn = cleanBtn("Edit", "#E0F2FE", "#0F5A9C", v -> { showPdfPage(idx); dlg.dismiss(); });
-            editPgBtn.setLayoutParams(new LinearLayout.LayoutParams(dp(64), dp(34)));
-            row.addView(editPgBtn);
+            Button zoomBtn = cleanBtn("Zoom", "#E0F2FE", "#0F5A9C", v -> { dlg.dismiss(); openZoomInspector(idx); });
+            zoomBtn.setLayoutParams(new LinearLayout.LayoutParams(dp(64), dp(34)));
+            row.addView(zoomBtn);
             listBox.addView(row);
         }
         dlg.show();
@@ -978,10 +1249,11 @@ public class MainActivity extends AppCompatActivity {
         Bitmap b = Bitmap.createBitmap((int)(p.getWidth() * 2.5f), (int)(p.getHeight() * 2.5f), Bitmap.Config.ARGB_8888);
         b.eraseColor(Color.WHITE); p.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT); p.close();
         rawBmp = b; applyEditsToPreview();
-        pageTxt.setText("PDF Page " + (idx + 1) + " of " + totalPages + " (Long-press thumb to select)");
+        pageTxt.setText("PDF Page " + (idx + 1) + "/" + totalPages + " — Tap preview to Zoom");
         refreshThumbStrip();
     }
 
+    // Smart Auto-Extract ID Card
     private void idDialog() {
         idFront = null; idBack = null; pickTarget = 1;
         picker.launch(new String[]{"application/pdf", "image/*"});
@@ -1026,13 +1298,11 @@ public class MainActivity extends AppCompatActivity {
         Bitmap trimmed = autoTrimWhitespace(src);
         int w = trimmed.getWidth(), h = trimmed.getHeight();
         if (w > h * 1.2f) {
-            // Side-by-Side cards (CKYC, Voter ID, cropped e-Aadhaar/PAN)
             idFront = autoTrimWhitespace(Bitmap.createBitmap(trimmed, 0, 0, w / 2, h));
             idBack = autoTrimWhitespace(Bitmap.createBitmap(trimmed, w / 2, 0, w - (w / 2), h));
         } else {
-            // Tall page: check bottom cutout (e-Aadhaar/e-PAN) vs Top/Bottom
             int sw = src.getWidth(), sh = src.getHeight();
-            int topY = (int)(sh * 0.61f), boxH = (int)(sh * 0.35f);
+            int topY = (int)(sh * 0.67f), boxH = (int)(sh * 0.29f);
             idFront = autoTrimWhitespace(Bitmap.createBitmap(src, (int)(sw * 0.04f), topY, (int)(sw * 0.45f), boxH));
             idBack = autoTrimWhitespace(Bitmap.createBitmap(src, (int)(sw * 0.51f), topY, (int)(sw * 0.45f), boxH));
         }
@@ -1048,7 +1318,7 @@ public class MainActivity extends AppCompatActivity {
             idBack = autoTrimWhitespace(Bitmap.createBitmap(trimmed, w / 2, 0, w - (w / 2), h));
         } else {
             int sw = lastIdSourceBmp.getWidth(), sh = lastIdSourceBmp.getHeight();
-            int topY = (int)(sh * 0.61f), boxH = (int)(sh * 0.35f);
+            int topY = (int)(sh * 0.67f), boxH = (int)(sh * 0.29f);
             idFront = autoTrimWhitespace(Bitmap.createBitmap(lastIdSourceBmp, (int)(sw * 0.04f), topY, (int)(sw * 0.45f), boxH));
             idBack = autoTrimWhitespace(Bitmap.createBitmap(lastIdSourceBmp, (int)(sw * 0.51f), topY, (int)(sw * 0.45f), boxH));
         }
@@ -1078,7 +1348,7 @@ public class MainActivity extends AppCompatActivity {
         cropPreview.setScaleType(ImageView.ScaleType.FIT_CENTER);
         box.addView(cropPreview);
 
-        final int[] vals = {0, 0, 100, 100}; // L, T, R, B %
+        final int[] vals = {0, 0, 100, 100};
         Runnable updateCrop = () -> {
             int w = lastIdSourceBmp.getWidth(), h = lastIdSourceBmp.getHeight();
             int l = (w * vals[0]) / 100, t = (h * vals[1]) / 100;
@@ -1142,7 +1412,6 @@ public class MainActivity extends AppCompatActivity {
                     if (x > rowMaxX) rowMaxX = x;
                 }
             }
-            // Ignore tiny stray marks (< 6 dark samples)
             if (darkCount >= 6) {
                 if (rowMinX < minX) minX = rowMinX;
                 if (rowMaxX > maxX) maxX = rowMaxX;
@@ -1167,35 +1436,111 @@ public class MainActivity extends AppCompatActivity {
         if (idBack != null) drawFit(c, idBack, r2, 0); else c.drawText("Back ID", 620, 1110, txtP);
         closePdf(); totalPages = 1; rawBmp = sh; resetEditsOnly(); applyEditsToPreview();
         idToolsRow1.setVisibility(View.VISIBLE); idToolsRow2.setVisibility(View.VISIBLE);
-        pageTxt.setText("2-in-1 ID Card Sheet Ready");
+        updateLoadedUiState("2-in-1 ID Card Ready — Tap preview to Zoom");
     }
 
+    // Flexible Passport Photo Sheet: 1, 2, 3, 4 ... up to 30 photos on A4 or 4x6!
     private void startPassportSheet() { pickTarget = 3; picker.launch(new String[]{"image/*"}); }
 
-    private void buildPassportSheet(Bitmap photo) {
-        String[] layouts = {"4 x 6 inch Sheet (6 Passport Photos)", "A4 Sheet (12 Passport Photos)"};
+    private void openPassportCustomDialog(Bitmap photo) {
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(18), dp(14), dp(18), dp(10));
+        box.addView(lbl("1. Paper Size:"));
+        Spinner ppPaperSp = spin(new String[]{"A4 Sheet (210 x 297 mm)", "4 x 6 inch Photo Paper"});
+        box.addView(ppPaperSp);
+
+        box.addView(lbl("2. Photo Size:"));
+        Spinner ppTypeSp = spin(new String[]{"Indian Passport (3.5 x 4.5 cm)", "Stamp Size (2.5 x 3.0 cm)"});
+        box.addView(ppTypeSp);
+
+        box.addView(lbl("3. Kitni Photos Print Karni Hain? (1 to 30):"));
+        final int[] count = {1};
+        LinearLayout cntRow = new LinearLayout(this); cntRow.setGravity(Gravity.CENTER_VERTICAL); cntRow.setPadding(0, dp(4), 0, dp(8));
+        TextView cntTxt = new TextView(this); cntTxt.setText("1 Photo"); cntTxt.setTextSize(16); cntTxt.setTypeface(null, Typeface.BOLD);
+        cntTxt.setTextColor(Color.parseColor("#0F172A")); cntTxt.setGravity(Gravity.CENTER);
+        cntTxt.setLayoutParams(new LinearLayout.LayoutParams(0, dp(40), 1f));
+
+        Button mBtn = cleanBtn("- 1", "#E2E8F0", "#0F172A", v -> { if (count[0] > 1) { count[0]--; cntTxt.setText(count[0] + " Photo" + (count[0] > 1 ? "s" : "")); } });
+        mBtn.setLayoutParams(new LinearLayout.LayoutParams(dp(56), dp(40)));
+        Button pBtn = cleanBtn("+ 1", "#0F5A9C", "#FFFFFF", v -> { if (count[0] < 30) { count[0]++; cntTxt.setText(count[0] + " Photos"); } });
+        pBtn.setLayoutParams(new LinearLayout.LayoutParams(dp(56), dp(40)));
+        cntRow.addView(mBtn); cntRow.addView(cntTxt); cntRow.addView(pBtn);
+        box.addView(cntRow);
+
+        // Quick count chips: 1, 2, 3, 4, 6, 8, 12, 24
+        LinearLayout qRow1 = new LinearLayout(this);
+        int[] q1 = {1, 2, 3, 4};
+        for (int n : q1) {
+            Button qb = cleanBtn(String.valueOf(n), "#EFF6FF", "#1D4ED8", v -> { count[0] = n; cntTxt.setText(n + " Photo" + (n > 1 ? "s" : "")); });
+            LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(0, dp(34), 1f); qlp.setMargins(dp(2), 0, dp(2), 0); qb.setLayoutParams(qlp);
+            qRow1.addView(qb);
+        }
+        box.addView(qRow1);
+
+        LinearLayout qRow2 = new LinearLayout(this); qRow2.setPadding(0, dp(6), 0, 0);
+        int[] q2 = {6, 8, 12, 24};
+        for (int n : q2) {
+            Button qb = cleanBtn(String.valueOf(n), "#EFF6FF", "#1D4ED8", v -> { count[0] = n; cntTxt.setText(n + " Photos"); });
+            LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(0, dp(34), 1f); qlp.setMargins(dp(2), 0, dp(2), 0); qb.setLayoutParams(qlp);
+            qRow2.addView(qb);
+        }
+        box.addView(qRow2);
+
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
-                .setTitle("Passport Photo Sheet").setItems(layouts, (d, w) -> {
-                    boolean is4x6 = (w == 0);
-                    int sw = is4x6 ? 1200 : 1240, sh = is4x6 ? 1800 : 1754;
-                    int cols = is4x6 ? 2 : 3, rows = is4x6 ? 3 : 4;
-                    Bitmap sheet = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888);
-                    Canvas c = new Canvas(sheet); c.drawColor(Color.WHITE);
-                    Paint border = new Paint(); border.setStyle(Paint.Style.STROKE); border.setColor(Color.LTGRAY); border.setStrokeWidth(2);
-                    int pad = 50, gap = 30;
-                    int cw = (sw - pad * 2 - gap * (cols - 1)) / cols, ch = (sh - pad * 2 - gap * (rows - 1)) / rows;
-                    for (int r = 0; r < rows; r++) {
-                        for (int col = 0; col < cols; col++) {
-                            int l = pad + col * (cw + gap), t = pad + r * (ch + gap);
-                            Rect box = new Rect(l, t, l + cw, t + ch);
-                            c.drawBitmap(photo, null, box, null); c.drawRect(box, border);
-                        }
-                    }
-                    if (is4x6) sizeSp.setSelection(3); else sizeSp.setSelection(0);
-                    qualSp.setSelection(2);
-                    closePdf(); totalPages = 1; rawBmp = sheet; resetEditsOnly(); applyEditsToPreview();
-                    pageTxt.setText(is4x6 ? "4x6 Passport Sheet (6 Photos)" : "A4 Passport Sheet (12 Photos)");
-                }).show();
+                .setTitle("Custom Passport Photo Sheet").setView(box)
+                .setPositiveButton("Generate Sheet", (d, w) -> {
+                    boolean is4x6 = (ppPaperSp.getSelectedItemPosition() == 1);
+                    boolean isStamp = (ppTypeSp.getSelectedItemPosition() == 1);
+                    buildCustomPassportSheet(photo, is4x6, isStamp, count[0]);
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    private void buildCustomPassportSheet(Bitmap photo, boolean is4x6, boolean isStamp, int photoCount) {
+        // 300 DPI exact physical sizing so 1, 2, 3... photos stay exact real-world passport size on top of A4/4x6!
+        int sw = is4x6 ? 1200 : 2480;
+        int sh = is4x6 ? 1800 : 3508;
+        int pw = isStamp ? 295 : 413; // 2.5cm or 3.5cm @ 300 DPI
+        int ph = isStamp ? 354 : 531; // 3.0cm or 4.5cm @ 300 DPI
+        int margin = 90, gapPx = 42;
+
+        int maxCols = Math.max(1, (sw - margin * 2 + gapPx) / (pw + gapPx));
+        int maxRows = Math.max(1, (sh - margin * 2 + gapPx) / (ph + gapPx));
+        int actualCount = Math.min(photoCount, maxCols * maxRows);
+
+        Bitmap sheet = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(sheet); c.drawColor(Color.WHITE);
+        Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
+        border.setStyle(Paint.Style.STROKE); border.setColor(Color.parseColor("#CBD5E1")); border.setStrokeWidth(3);
+
+        for (int i = 0; i < actualCount; i++) {
+            int col = i % maxCols;
+            int row = i / maxCols;
+            int l = margin + col * (pw + gapPx);
+            int t = margin + row * (ph + gapPx);
+            Rect box = new Rect(l, t, l + pw, t + ph);
+            drawCenterCrop(c, photo, box);
+            c.drawRect(box, border);
+        }
+
+        if (is4x6) sizeSp.setSelection(3); else sizeSp.setSelection(0);
+        qualSp.setSelection(2);
+        closePdf(); totalPages = 1; rawBmp = sheet; resetEditsOnly(); applyEditsToPreview();
+        updateLoadedUiState((is4x6 ? "4x6" : "A4") + " Sheet (" + actualCount + " Passport Photo" + (actualCount > 1 ? "s" : "") + ")");
+    }
+
+    private void drawCenterCrop(Canvas c, Bitmap src, Rect dst) {
+        float srcRatio = (float) src.getWidth() / src.getHeight();
+        float dstRatio = (float) dst.width() / dst.height();
+        Rect srcRect;
+        if (srcRatio > dstRatio) {
+            int cropW = Math.round(src.getHeight() * dstRatio);
+            int xOff = (src.getWidth() - cropW) / 2;
+            srcRect = new Rect(xOff, 0, xOff + cropW, src.getHeight());
+        } else {
+            int cropH = Math.round(src.getWidth() / dstRatio);
+            int yOff = (src.getHeight() - cropH) / 2;
+            srcRect = new Rect(0, yOff, src.getWidth(), yOff + cropH);
+        }
+        c.drawBitmap(src, srcRect, dst, new Paint(Paint.FILTER_BITMAP_FLAG));
     }
 
     private void saveCurrentAsJpg() {
@@ -1237,7 +1582,9 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) { Toast.makeText(this, "PDF failed: " + e.getMessage(), Toast.LENGTH_SHORT).show(); }
         finally { doc.close(); }
     }
-        private void openPrinterScannerDialog() {
+
+    // Printer Scanner (eSCL over HTTPS 443 + HTTP 8080/80 + Wi-Fi Direct binding + WebScan SSL Fix)
+    private void openPrinterScannerDialog() {
         LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(18), dp(14), dp(18), dp(10));
         TextView hint = new TextView(this); hint.setText("HP Smart Tank 589 glass par document rakhein aur Scan Now dabayein:");
         hint.setTextColor(Color.parseColor("#0F172A")); hint.setTextSize(13); box.addView(hint);
@@ -1248,7 +1595,11 @@ public class MainActivity extends AppCompatActivity {
         Spinner scanColorSp = spin(new String[]{"Color Scan (RGB)", "Black & White Scan"});
         box.addView(scanColorSp);
 
-        TextView st = new TextView(this); st.setText("Ready to scan"); st.setTextColor(Color.parseColor("#0E7490")); st.setPadding(0, dp(8), 0, dp(4));
+        Spinner scanDpiSp = spin(new String[]{"300 DPI (Clear Document)", "150 DPI (Fast Scan)"});
+        box.addView(scanDpiSp);
+
+        TextView st = new TextView(this); st.setText("Ready — Wi-Fi bound to " + printerIp);
+        st.setTextColor(Color.parseColor("#0E7490")); st.setPadding(0, dp(8), 0, dp(4));
         box.addView(st);
 
         ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal); pb.setMax(100);
@@ -1257,48 +1608,91 @@ public class MainActivity extends AppCompatActivity {
         AlertDialog dlg = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
                 .setTitle("Scan from HP Smart Tank 589").setView(box)
                 .setPositiveButton("Scan Now", null)
-                .setNeutralButton("WebScan", (d, w) -> openWebDialog("http://" + ipEd.getText().toString().trim() + "/#hId-pgWebScan"))
+                .setNeutralButton("WebScan", (d, w) -> openWebDialog("https://" + ipEd.getText().toString().trim() + "/#hId-pgWebScan"))
                 .setNegativeButton("Close", null).create();
         dlg.show();
 
         dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             printerIp = ipEd.getText().toString().trim();
             dlg.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-            runEsclScan(printerIp, scanColorSp.getSelectedItemPosition() == 0, st, pb, dlg);
+            boolean isColor = scanColorSp.getSelectedItemPosition() == 0;
+            int dpi = scanDpiSp.getSelectedItemPosition() == 0 ? 300 : 150;
+            runEsclScan(printerIp, isColor, dpi, st, pb, dlg);
         });
     }
 
-    private void runEsclScan(String ip, boolean isColor, TextView st, ProgressBar pb, AlertDialog dlg) {
+    private void runEsclScan(String ip, boolean isColor, int dpi, TextView st, ProgressBar pb, AlertDialog dlg) {
         new Thread(() -> {
             try {
-                uiHandler.post(() -> { st.setText("Connecting to scanner..."); pb.setProgress(25); });
-                String xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><scan:ScanSettings xmlns:scan=\"http://schemas.hp.com/imaging/escl/2011/05/03\" xmlns:pwg=\"http://www.pwg.org/schemas/2012/12/pwg\"><pwg:Version>2.6</pwg:Version><pwg:ScanRegions><pwg:ScanRegion><pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits><pwg:Height>3508</pwg:Height><pwg:Width>2480</pwg:Width><pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset></pwg:ScanRegion></pwg:ScanRegions><scan:InputSource>Platen</scan:InputSource><scan:ColorMode>" + (isColor ? "RGB24" : "Grayscale8") + "</scan:ColorMode><scan:XResolution>300</scan:XResolution><scan:YResolution>300</scan:YResolution><pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat></scan:ScanSettings>";
-                String loc = postEscl("http://" + ip + "/eSCL/ScanJobs", xml);
-                if (loc == null) loc = postEscl("http://" + ip + ":8080/eSCL/ScanJobs", xml);
-                if (loc == null) throw new Exception("Scanner not reachable! Tap 'WebScan' or check Wi-Fi.");
-                if (loc.startsWith("/")) loc = "http://" + ip + loc;
-                String docUrl = loc.endsWith("/") ? (loc + "NextDocument") : (loc + "/NextDocument");
+                uiHandler.post(() -> { st.setText("Connecting via Wi-Fi / HTTPS to HP 589..."); pb.setProgress(20); });
+                String xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                        + "<scan:ScanSettings xmlns:scan=\"http://schemas.hp.com/imaging/escl/2011/05/03\" xmlns:pwg=\"http://www.pwg.org/schemas/2012/12/pwg\">"
+                        + "<pwg:Version>2.6</pwg:Version>"
+                        + "<pwg:ScanRegions><pwg:ScanRegion>"
+                        + "<pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>"
+                        + "<pwg:Height>3508</pwg:Height><pwg:Width>2480</pwg:Width>"
+                        + "<pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset>"
+                        + "</pwg:ScanRegion></pwg:ScanRegions>"
+                        + "<scan:InputSource>Platen</scan:InputSource>"
+                        + "<scan:ColorMode>" + (isColor ? "RGB24" : "Grayscale8") + "</scan:ColorMode>"
+                        + "<scan:XResolution>" + dpi + "</scan:XResolution>"
+                        + "<scan:YResolution>" + dpi + "</scan:YResolution>"
+                        + "<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>"
+                        + "</scan:ScanSettings>";
 
-                uiHandler.post(() -> { st.setText("Scanning page..."); pb.setProgress(60); });
-                byte[] bytes = null;
-                for (int i = 0; i < 18; i++) {
-                    Thread.sleep(1500);
-                    HttpURLConnection c = (HttpURLConnection) new URL(docUrl).openConnection();
-                    c.setConnectTimeout(5000); c.setReadTimeout(20000);
-                    if (c.getResponseCode() == 200) {
-                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                        try (InputStream is = c.getInputStream()) { byte[] buf = new byte[8192]; int r; while ((r = is.read(buf)) != -1) baos.write(buf, 0, r); }
-                        bytes = baos.toByteArray(); break;
+                String[] endpoints = {
+                        "https://" + ip + "/eSCL/ScanJobs",
+                        "http://" + ip + ":8080/eSCL/ScanJobs",
+                        "http://" + ip + "/eSCL/ScanJobs"
+                };
+                String loc = null;
+                String usedBase = "https://" + ip;
+                StringBuilder errs = new StringBuilder();
+                for (String ep : endpoints) {
+                    String[] res = postEsclWithReason(ep, xml);
+                    if (res[0] != null) {
+                        loc = res[0];
+                        usedBase = ep.substring(0, ep.indexOf("/eSCL"));
+                        break;
+                    } else {
+                        errs.append(res[1]).append(" | ");
                     }
                 }
-                if (bytes == null || bytes.length == 0) throw new Exception("Scan timeout!");
+                if (loc == null) {
+                    throw new Exception("Scanner blocked/offline (" + errs.toString().trim() + "). Tap 'WebScan' to enable/scan.");
+                }
+                if (loc.startsWith("/")) loc = usedBase + loc;
+                String docUrl = loc.endsWith("/") ? (loc + "NextDocument") : (loc + "/NextDocument");
+
+                uiHandler.post(() -> { st.setText("Printer scanning glass... Wait 5-10 sec"); pb.setProgress(55); });
+                byte[] bytes = null;
+                for (int i = 0; i < 20; i++) {
+                    Thread.sleep(1500);
+                    HttpURLConnection c = openPrinterHttp(docUrl, "GET", 6000, 25000);
+                    int code = c.getResponseCode();
+                    if (code == 301 || code == 302) {
+                        String redir = c.getHeaderField("Location");
+                        if (redir != null) { docUrl = redir; continue; }
+                    }
+                    if (code == 200) {
+                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                        try (InputStream is = c.getInputStream()) {
+                            byte[] buf = new byte[8192]; int r;
+                            while ((r = is.read(buf)) != -1) baos.write(buf, 0, r);
+                        }
+                        bytes = baos.toByteArray();
+                        break;
+                    }
+                }
+                if (bytes == null || bytes.length == 0) throw new Exception("Scan timed out! Check printer screen.");
                 Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                if (bmp == null) throw new Exception("Invalid scan image");
+                if (bmp == null) throw new Exception("Invalid scan image returned.");
 
                 uiHandler.post(() -> {
                     pb.setProgress(100); closePdf(); totalPages = 1; rawBmp = bmp; resetEditsOnly(); applyEditsToPreview();
-                    pageTxt.setText("Scanned from HP 589 — Edit or Save JPG/PDF");
+                    updateLoadedUiState("Scanned from HP 589 — Save JPG/PDF or Print");
                     dlg.dismiss();
+                    Toast.makeText(this, "Scan complete! Saved to preview.", Toast.LENGTH_SHORT).show();
                 });
             } catch (Exception e) {
                 uiHandler.post(() -> { st.setText(e.getMessage()); dlg.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true); });
@@ -1306,15 +1700,18 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    private String postEscl(String url, String xml) {
+    private String[] postEsclWithReason(String url, String xml) {
         try {
-            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-            c.setConnectTimeout(5000); c.setReadTimeout(10000); c.setRequestMethod("POST"); c.setDoOutput(true);
+            HttpURLConnection c = openPrinterHttp(url, "POST", 5000, 12000);
+            c.setDoOutput(true);
             c.setRequestProperty("Content-Type", "text/xml");
             try (OutputStream os = c.getOutputStream()) { os.write(xml.getBytes(StandardCharsets.UTF_8)); }
-            if (c.getResponseCode() == 201) return c.getHeaderField("Location");
-        } catch (Exception ignored) {}
-        return null;
+            int code = c.getResponseCode();
+            if (code == 201) return new String[]{c.getHeaderField("Location"), "OK"};
+            return new String[]{null, "HTTP " + code};
+        } catch (Exception e) {
+            return new String[]{null, e.getClass().getSimpleName()};
+        }
     }
 
     private List<Integer> parsePageIndices(int total) {
@@ -1328,30 +1725,39 @@ public class MainActivity extends AppCompatActivity {
         Set<Integer> set = new LinkedHashSet<>();
         for (String part : txt.split(",")) {
             part = part.trim();
-            if (part.contains("-")) {
-                String[] ab = part.split("-");
-                if (ab.length == 2) {
-                    int s = Math.max(1, Integer.parseInt(ab[0].trim()));
-                    int e = Math.min(total, Integer.parseInt(ab[1].trim()));
-                    for (int p = s; p <= e; p++) set.add(p - 1);
+            try {
+                if (part.contains("-")) {
+                    String[] ab = part.split("-");
+                    if (ab.length == 2) {
+                        int s = Math.max(1, Integer.parseInt(ab[0].trim()));
+                        int e = Math.min(total, Integer.parseInt(ab[1].trim()));
+                        for (int p = s; p <= e; p++) set.add(p - 1);
+                    }
+                } else if (!part.isEmpty()) {
+                    int p = Integer.parseInt(part);
+                    if (p >= 1 && p <= total) set.add(p - 1);
                 }
-            } else {
-                int p = Integer.parseInt(part);
-                if (p >= 1 && p <= total) set.add(p - 1);
-            }
+            } catch (NumberFormatException ignored) {}
         }
         return new ArrayList<>(set);
     }
 
     private void openInAppPrintSheet() {
         if (rawBmp == null && pdfRen == null) { Toast.makeText(this, "Pehle file chunein ya scan karein!", Toast.LENGTH_SHORT).show(); return; }
-        boolean isDuplex = duplexSp.getSelectedItemPosition() == 1;
-        launchDirectPrintDialog(isDuplex ? 1 : 0);
+        int dupMode = duplexSp.getSelectedItemPosition();
+        // 0=Single, 1=Front All Odd, 2=Back All Even Reverse, 3=Back All Even Normal, 4=Auto Manual Duplex
+        launchDirectPrintDialog(dupMode, false);
     }
 
-    private void launchDirectPrintDialog(int duplexStep) {
+    private void launchDirectPrintDialog(int dupMode, boolean isAutoStep2) {
         LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(dp(18), dp(14), dp(18), dp(10));
-        String title = duplexStep == 1 ? "Manual Duplex — Step 1 (Odd Pages)" : duplexStep == 2 ? "Manual Duplex — Step 2 (Even Pages)" : "Aman Print — Direct Spooler";
+        String title = isAutoStep2 ? "Manual Duplex — Back Pages (Even Reverse)"
+                : dupMode == 1 ? "Front Pages Only (All Odd: 1, 3, 5...)"
+                : dupMode == 2 ? "Back Pages Only (All Even Reverse)"
+                : dupMode == 3 ? "Back Pages Only (All Even Normal)"
+                : dupMode == 4 ? "Auto Manual Duplex — Step 1 (Front Odd)"
+                : "Aman Print — Direct Spooler";
+
         TextView info = new TextView(this);
         info.setText("Printer: " + printerName + " (" + connMode + ") | Copies: " + copyCount);
         info.setTextColor(Color.parseColor("#0F172A")); info.setTextSize(13); info.setTypeface(null, Typeface.BOLD);
@@ -1376,24 +1782,26 @@ public class MainActivity extends AppCompatActivity {
         dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             if (!connMode.equals("USB OTG")) printerIp = ipBox.getText().toString().trim();
             dlg.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-            runDirectPrintJob(duplexStep, progTxt, bar, dlg);
+            runDirectPrintJob(dupMode, isAutoStep2, progTxt, bar, dlg);
         });
     }
 
     private int[] getSelectedPaperPoints() {
         int sz = sizeSp.getSelectedItemPosition();
-        if (sz == 1) return new int[]{709, 595};  // 25x21 cm
-        if (sz == 2) return new int[]{624, 794};  // 22x28 cm
-        if (sz == 3) return new int[]{288, 432};  // 4x6 in
-        if (sz == 4) return new int[]{360, 504};  // 5x7 in
-        if (sz == 5) return new int[]{420, 595};  // A5
-        if (sz == 6) return new int[]{612, 1008}; // Legal
-        return new int[]{595, 842};               // A4
+        if (sz == 1) return new int[]{709, 595};
+        if (sz == 2) return new int[]{624, 794};
+        if (sz == 3) return new int[]{288, 432};
+        if (sz == 4) return new int[]{360, 504};
+        if (sz == 5) return new int[]{420, 595};
+        if (sz == 6) return new int[]{612, 1008};
+        return new int[]{595, 842};
     }
 
-    private void runDirectPrintJob(int duplexStep, TextView progTxt, ProgressBar bar, AlertDialog dlg) {
+    private void runDirectPrintJob(int dupMode, boolean isAutoStep2, TextView progTxt, ProgressBar bar, AlertDialog dlg) {
         final int multi = multiSp.getSelectedItemPosition(), sc = scaleSp.getSelectedItemPosition(), mg = marginSp.getSelectedItemPosition();
-        final int q = qualSp.getSelectedItemPosition(), copies = (duplexStep > 0) ? 1 : copyCount;
+        final int q = qualSp.getSelectedItemPosition();
+        final boolean isDuplexJob = (dupMode > 0);
+        final int copies = isDuplexJob ? 1 : copyCount;
         final boolean rev = revCheck.isChecked(), isColor = (colorMode == 0), isLand = (orientationMode == 1);
         final int[] pts = getSelectedPaperPoints();
         final int ptW = isLand ? pts[1] : pts[0];
@@ -1404,13 +1812,17 @@ public class MainActivity extends AppCompatActivity {
                 int cnt = (pdfRen != null) ? totalPages : 1;
                 List<Integer> rawList = parsePageIndices(cnt);
                 List<Integer> list = new ArrayList<>();
+                boolean wantOdd = (dupMode == 1) || (dupMode == 4 && !isAutoStep2);
+                boolean wantEven = (dupMode == 2) || (dupMode == 3) || (dupMode == 4 && isAutoStep2);
+                boolean reverseEven = (dupMode == 2) || (dupMode == 4 && isAutoStep2);
+
                 for (int idx : rawList) {
                     int pn = idx + 1;
-                    if (duplexStep == 1) { if (pn % 2 == 1) list.add(idx); }
-                    else if (duplexStep == 2) { if (pn % 2 == 0) list.add(idx); }
+                    if (wantOdd) { if (pn % 2 == 1) list.add(idx); }
+                    else if (wantEven) { if (pn % 2 == 0) list.add(idx); }
                     else list.add(idx);
                 }
-                if (rev || duplexStep == 2) Collections.reverse(list);
+                if (rev || reverseEven) Collections.reverse(list);
                 if (list.isEmpty()) throw new Exception("Selected range mein koi page nahi hai!");
 
                 uiHandler.post(() -> { progTxt.setText("Rendering 300 DPI pages..."); bar.setProgress(30); });
@@ -1453,7 +1865,7 @@ public class MainActivity extends AppCompatActivity {
                 List<Bitmap> finalSheets = new ArrayList<>();
                 for (int c = 0; c < copies; c++) finalSheets.addAll(oneSet);
 
-                uiHandler.post(() -> { progTxt.setText("Building PWG-Raster stream..."); bar.setProgress(60); });
+                uiHandler.post(() -> { progTxt.setText("Encoding 300 DPI PWG-Raster..."); bar.setProgress(60); });
                 int qualVal = (q == 2 ? 5 : (q == 1 || inkSaverOn ? 3 : 4));
                 byte[] pwgData = buildPwgRaster(finalSheets, isColor, dpi, ptW, ptH, qualVal);
                 byte[] ippPacket = buildIppPacket(printerIp, pwgData, isColor, qualVal);
@@ -1464,14 +1876,29 @@ public class MainActivity extends AppCompatActivity {
 
                 uiHandler.post(() -> {
                     bar.setProgress(100);
-                    progTxt.setText("Sent to Printer! (" + finalSheets.size() + " sheets @ 300 DPI)");
-                    if (duplexStep == 1) {
-                        dlg.dismiss();
+                    dlg.dismiss();
+                    if (dupMode == 4 && !isAutoStep2) {
                         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
                                 .setTitle("कागज़ पलटकर डालें")
-                                .setMessage("Odd पेज (1, 3, 5...) प्रिंट हो गए हैं। अब प्रिंटेड कागज़ पलटकर ट्रे में डालें, फिर Continue दबाएँ ताकि Even पेज अपने-आप उल्टे क्रम में प्रिंट हों।")
-                                .setPositiveButton("Continue (Print Even)", (d2, w2) -> launchDirectPrintDialog(2))
-                                .setNegativeButton("Cancel", null).show();
+                                .setMessage("Front (Odd: 1, 3, 5...) पेज प्रिंट हो गए हैं। अब प्रिंटेड कागज़ पलटकर ट्रे में डालें, फिर Continue दबाएँ।")
+                                .setPositiveButton("Continue (Back Even)", (d2, w2) -> launchDirectPrintDialog(4, true))
+                                .setNegativeButton("Done", null).show();
+                    } else if (dupMode == 1) {
+                        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
+                                .setTitle("Front Pages Printed!")
+                                .setMessage("सभी Front (Odd) पेज प्रिंट हो गए हैं। क्या अब कागज़ पलटकर Back (Even Reverse) पेज प्रिंट करने हैं?")
+                                .setPositiveButton("Print Back Pages Now", (d2, w2) -> { duplexSp.setSelection(2); launchDirectPrintDialog(2, false); })
+                                .setNegativeButton("Done & Clear", (d2, w2) -> clearWorkspaceForNewPrint()).show();
+                    } else {
+                        // Automatically show clean finished dialog with 1-tap New Print (Clear) so user never has to restart app!
+                        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
+                                .setTitle("Print Finished!")
+                                .setMessage(finalSheets.size() + " sheet(s) sent to HP Smart Tank 589.\n\nनया प्रिंट करने के लिए 'New Print (Clear)' दबाएँ।")
+                                .setPositiveButton("New Print (Clear)", (d2, w2) -> {
+                                    clearWorkspaceForNewPrint();
+                                    Toast.makeText(this, "Screen cleared! Ready for new print.", Toast.LENGTH_SHORT).show();
+                                })
+                                .setNegativeButton("Keep File", null).show();
                     }
                 });
             } catch (Exception e) {
@@ -1516,28 +1943,21 @@ public class MainActivity extends AppCompatActivity {
             int w = bmp.getWidth(), h = bmp.getHeight();
             ByteBuffer hdr = ByteBuffer.allocate(1796).order(ByteOrder.BIG_ENDIAN);
             hdr.put("PwgRaster".getBytes(StandardCharsets.US_ASCII));
-            hdr.putInt(276, dpi);                  // HWResolution X = 300
-            hdr.putInt(280, dpi);                  // HWResolution Y = 300
-            hdr.putInt(292, ptW);                  // ImagingBoundingBox right
-            hdr.putInt(296, ptH);                  // ImagingBoundingBox top
-            hdr.putInt(340, 1);                    // NumCopies
-            hdr.putInt(352, ptW);                  // PageSize width (points)
-            hdr.putInt(356, ptH);                  // PageSize height (points)
-            hdr.putInt(372, w);                    // cupsWidth (pixels)
-            hdr.putInt(376, h);                    // cupsHeight (pixels)
-            hdr.putInt(384, 8);                    // cupsBitsPerColor
-            hdr.putInt(388, isColor ? 24 : 8);     // cupsBitsPerPixel
-            hdr.putInt(392, isColor ? (w * 3) : w);// cupsBytesPerLine
-            hdr.putInt(396, 0);                    // cupsColorOrder (Chunky)
-            hdr.putInt(400, isColor ? 19 : 18);    // cupsColorSpace (19=sRGB, 18=sGray)
-            hdr.putInt(420, isColor ? 3 : 1);      // cupsNumColors
-            hdr.putInt(452, pages.size());         // TotalPageCount
-            hdr.putInt(456, 1);                    // CrossFeedTransform
-            hdr.putInt(460, 1);                    // FeedTransform
-            hdr.putInt(472, w);                    // ImageBoxRight
-            hdr.putInt(476, h);                    // ImageBoxBottom
-            hdr.putInt(480, 0x00FFFFFF);           // AlternatePrimary (White)
-            hdr.putInt(484, qual);                 // PrintQuality
+            hdr.putInt(276, dpi); hdr.putInt(280, dpi);
+            hdr.putInt(292, ptW); hdr.putInt(296, ptH);
+            hdr.putInt(340, 1);
+            hdr.putInt(352, ptW); hdr.putInt(356, ptH);
+            hdr.putInt(372, w); hdr.putInt(376, h);
+            hdr.putInt(384, 8);
+            hdr.putInt(388, isColor ? 24 : 8);
+            hdr.putInt(392, isColor ? (w * 3) : w);
+            hdr.putInt(396, 0);
+            hdr.putInt(400, isColor ? 19 : 18);
+            hdr.putInt(420, isColor ? 3 : 1);
+            hdr.putInt(452, pages.size());
+            hdr.putInt(456, 1); hdr.putInt(460, 1);
+            hdr.putInt(472, w); hdr.putInt(476, h);
+            hdr.putInt(480, 0x00FFFFFF); hdr.putInt(484, qual);
             out.write(hdr.array());
 
             int[] row = new int[w];
@@ -1601,8 +2021,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void sendIpp(String ip, byte[] ippPacket) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL("http://" + ip + ":631/ipp/print").openConnection();
-        c.setConnectTimeout(6000); c.setReadTimeout(30000); c.setRequestMethod("POST"); c.setDoOutput(true);
+        HttpURLConnection c = openPrinterHttp("http://" + ip + ":631/ipp/print", "POST", 6000, 30000);
+        c.setDoOutput(true);
         c.setRequestProperty("Content-Type", "application/ipp");
         try (OutputStream os = c.getOutputStream()) { os.write(ippPacket); }
         int code = c.getResponseCode();
@@ -1656,48 +2076,174 @@ public class MainActivity extends AppCompatActivity {
                 .setNegativeButton("Cancel", null).show();
     }
 
-    private void openInkAndDashboard() {
-        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(14), dp(12), dp(14), dp(12));
-        TextView inkTitle = new TextView(this); inkTitle.setText("HP Smart Tank 589 Live Ink Levels (Checking...)");
-        inkTitle.setTypeface(null, Typeface.BOLD); inkTitle.setTextColor(Color.parseColor("#0F172A")); box.addView(inkTitle);
+    // Generate & Print Built-in CMYK Nozzle Check + Head Cleaning Test Pattern
+    private void printNozzleCheckPage() {
+        Bitmap test = Bitmap.createBitmap(2480, 3508, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(test); c.drawColor(Color.WHITE);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-        LinearLayout barsBox = new LinearLayout(this); barsBox.setOrientation(LinearLayout.VERTICAL); barsBox.setPadding(0, dp(6), 0, dp(10));
+        p.setColor(Color.BLACK); p.setTextSize(72); p.setTypeface(Typeface.DEFAULT_BOLD);
+        c.drawText("AMAN PRINT — HP SMART TANK 589 NOZZLE CHECK", 150, 220, p);
+        p.setTextSize(42); p.setTypeface(Typeface.DEFAULT);
+        c.drawText("Check all 4 color bars & fine grids below for missing lines (clogged nozzles):", 150, 300, p);
+
+        String[] names = {"BLACK (K) — Pigment Black", "CYAN (C) — Blue Tank", "MAGENTA (M) — Pink Tank", "YELLOW (Y) — Yellow Tank"};
+        int[] cols = {Color.BLACK, Color.CYAN, Color.MAGENTA, Color.YELLOW};
+        for (int i = 0; i < 4; i++) {
+            int topY = 440 + i * 540;
+            p.setColor(Color.BLACK); p.setStyle(Paint.Style.FILL); p.setTextSize(44);
+            c.drawText(names[i], 150, topY, p);
+
+            p.setColor(cols[i]);
+            c.drawRect(150, topY + 30, 1250, topY + 250, p);
+
+            // Fine nozzle step grid
+            p.setStrokeWidth(5);
+            for (int l = 0; l < 18; l++) {
+                int ly = topY + 40 + l * 12;
+                c.drawLine(1320 + (l % 3) * 30, ly, 2320, ly, p);
+            }
+            p.setStyle(Paint.Style.STROKE); p.setColor(Color.DKGRAY); p.setStrokeWidth(3);
+            c.drawRect(150, topY + 30, 1250, topY + 250, p);
+            p.setStyle(Paint.Style.FILL);
+        }
+
+        // Alignment fine text & border
+        p.setColor(Color.BLACK); p.setTextSize(38);
+        c.drawText("Fine Text Sharpness: ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 @#$%", 150, 2720, p);
+        c.drawText("If lines are broken, run Printhead Cleaning from HP EWS below.", 150, 2810, p);
+
+        closePdf(); totalPages = 1; rawBmp = test; resetEditsOnly(); setColor(0); sizeSp.setSelection(0);
+        applyEditsToPreview();
+        updateLoadedUiState("Nozzle Check Test Page Ready — Tap PRINT NOW");
+        Toast.makeText(this, "Nozzle Check page loaded! Tap PRINT NOW to print.", Toast.LENGTH_LONG).show();
+    }
+
+    private void configurePrinterWebView(WebView wv) {
+        WebSettings ws = wv.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setDomStorageEnabled(true);
+        ws.setLoadWithOverviewMode(true);
+        ws.setUseWideViewPort(true);
+        ws.setBuiltInZoomControls(true);
+        ws.setDisplayZoomControls(false);
+        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        wv.setWebViewClient(new WebViewClient() {
+            private boolean triedHttpFallback = false;
+            @Override public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+                handler.proceed();
+            }
+            @Override public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                if (!triedHttpFallback && failingUrl != null && failingUrl.startsWith("https://")) {
+                    triedHttpFallback = true;
+                    view.loadUrl(failingUrl.replaceFirst("https://", "http://"));
+                }
+            }
+        });
+    }
+
+    private void openInkAndDashboard() {
+        bindToWifiNetwork(true);
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+        TextView note = new TextView(this);
+        note.setText("Note: HP Smart Tank 589 bottle tanks mein physical % sensor nahi hota (front glass se level dikhta hai). Neeche printer status + Nozzle Check diya hai:");
+        note.setTextSize(12); note.setTextColor(Color.parseColor("#475569"));
+        box.addView(note);
+
+        TextView inkTitle = new TextView(this); inkTitle.setText("Checking HP 589 Status...");
+        inkTitle.setTypeface(null, Typeface.BOLD); inkTitle.setTextColor(Color.parseColor("#0F172A"));
+        inkTitle.setPadding(0, dp(8), 0, dp(4));
+        box.addView(inkTitle);
+
+        LinearLayout barsBox = new LinearLayout(this); barsBox.setOrientation(LinearLayout.VERTICAL); barsBox.setPadding(0, dp(2), 0, dp(8));
         box.addView(barsBox);
+
+        final AlertDialog[] inkDlgRef = new AlertDialog[1];
+        LinearLayout btnRow = new LinearLayout(this); btnRow.setPadding(0, 0, 0, dp(8));
+        btnRow.addView(cleanBtn("Print Nozzle Check", "#DCFCE7", "#166534", v -> {
+            if (inkDlgRef[0] != null) inkDlgRef[0].dismiss();
+            printNozzleCheckPage();
+        }));
+        gap(btnRow, 8);
+        btnRow.addView(cleanBtn("Open EWS in Chrome", "#DBEAFE", "#1E40AF", v -> {
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://" + printerIp))); } catch (Exception ignored) {}
+        }));
+        box.addView(btnRow);
 
         new Thread(() -> {
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL("http://" + printerIp + "/DevMgmt/ConsumableConfigDyn.xml").openConnection();
-                c.setConnectTimeout(4000); c.setReadTimeout(5000);
-                BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream()));
-                StringBuilder sb = new StringBuilder(); String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-                Matcher mLabel = Pattern.compile("<dd:ConsumableLabelCode>([^<]+)</dd:ConsumableLabelCode>").matcher(sb.toString());
-                Matcher mPct = Pattern.compile("<dd:ConsumablePercentageLevelRemaining>(\\d+)</dd:ConsumablePercentageLevelRemaining>").matcher(sb.toString());
-                List<String> labels = new ArrayList<>(); List<Integer> pcts = new ArrayList<>();
-                while (mLabel.find() && mPct.find()) { labels.add(mLabel.group(1)); pcts.add(Integer.parseInt(mPct.group(1))); }
+                String xml = fetchPrinterXml("https://" + printerIp + "/DevMgmt/ConsumableConfigDyn.xml");
+                if (xml == null) xml = fetchPrinterXml("http://" + printerIp + "/DevMgmt/ConsumableConfigDyn.xml");
+                if (xml == null) throw new Exception("No XML");
+
+                Matcher mLabel = Pattern.compile("<dd:ConsumableLabelCode>([^<]+)</dd:ConsumableLabelCode>").matcher(xml);
+                Matcher mPct = Pattern.compile("<dd:ConsumablePercentageLevelRemaining>(\\d+)</dd:ConsumablePercentageLevelRemaining>").matcher(xml);
+                Matcher mState = Pattern.compile("<dd:ConsumableState>([^<]+)</dd:ConsumableState>").matcher(xml);
+                List<String> labels = new ArrayList<>(); List<String> infos = new ArrayList<>(); List<Integer> pcts = new ArrayList<>();
+                while (mLabel.find()) {
+                    labels.add(mLabel.group(1));
+                    int pct = mPct.find() ? Integer.parseInt(mPct.group(1)) : -1;
+                    String st = mState.find() ? mState.group(1) : "OK";
+                    pcts.add(pct);
+                    infos.add(pct >= 0 ? (pct + "% (" + st + ")") : st);
+                }
                 uiHandler.post(() -> {
-                    inkTitle.setText(labels.isEmpty() ? "Live Ink % unavailable — Check EWS below" : "HP Smart Tank 589 Live Ink Tanks:");
+                    inkTitle.setText(labels.isEmpty() ? "HP 589 Connected — Live EWS Dashboard:" : "HP Smart Tank 589 Ink Status:");
                     for (int i = 0; i < labels.size(); i++) {
                         String code = labels.get(i); int pct = pcts.get(i);
                         int col = code.contains("C") ? Color.parseColor("#06B6D4") : code.contains("M") ? Color.parseColor("#EC4899") : code.contains("Y") ? Color.parseColor("#EAB308") : Color.parseColor("#1E293B");
-                        TextView t = new TextView(this); t.setText(code + " Tank: " + pct + "%"); t.setTextSize(12); t.setTextColor(col);
-                        ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-                        pb.setMax(100); pb.setProgress(pct); pb.setProgressTintList(ColorStateList.valueOf(col));
-                        barsBox.addView(t); barsBox.addView(pb);
+                        TextView t = new TextView(this); t.setText(code + " Tank: " + infos.get(i)); t.setTextSize(12); t.setTextColor(col);
+                        barsBox.addView(t);
+                        if (pct >= 0) {
+                            ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                            pb.setMax(100); pb.setProgress(pct); pb.setProgressTintList(ColorStateList.valueOf(col));
+                            barsBox.addView(pb);
+                        }
                     }
                 });
-            } catch (Exception e) { uiHandler.post(() -> inkTitle.setText("Connect printer Wi-Fi to read live Ink %")); }
+            } catch (Exception e) {
+                uiHandler.post(() -> inkTitle.setText("HP EWS Dashboard (" + printerIp + "):"));
+            }
         }).start();
 
-        WebView wv = new WebView(this); wv.getSettings().setJavaScriptEnabled(true); wv.setWebViewClient(new WebViewClient());
-        wv.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280))); wv.loadUrl("http://" + printerIp);
+        WebView wv = new WebView(this);
+        configurePrinterWebView(wv);
+        wv.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(300)));
+        wv.loadUrl("https://" + printerIp);
         box.addView(wv);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert).setTitle("Ink Levels & EWS").setView(box).setPositiveButton("Close", null).show();
+
+        inkDlgRef[0] = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
+                .setTitle("Ink, Nozzle Check & EWS").setView(box).setPositiveButton("Close", null).show();
+    }
+
+    private String fetchPrinterXml(String urlStr) {
+        try {
+            HttpURLConnection c = openPrinterHttp(urlStr, "GET", 4000, 6000);
+            if (c.getResponseCode() != 200) return null;
+            BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream()));
+            StringBuilder sb = new StringBuilder(); String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+            return sb.toString();
+        } catch (Exception e) { return null; }
     }
 
     private void openWebDialog(String url) {
-        WebView wv = new WebView(this); wv.getSettings().setJavaScriptEnabled(true); wv.setWebViewClient(new WebViewClient()); wv.loadUrl(url);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert).setTitle("HP WebScan").setView(wv).setPositiveButton("Close", null).show();
+        bindToWifiNetwork(true);
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(10), dp(10), dp(10), dp(10));
+        Button chromeBtn = cleanBtn("Open in Chrome Browser", "#DBEAFE", "#1E40AF", v -> {
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch (Exception ignored) {}
+        });
+        chromeBtn.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38)));
+        box.addView(chromeBtn);
+
+        WebView wv = new WebView(this);
+        configurePrinterWebView(wv);
+        wv.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(380)));
+        wv.loadUrl(url);
+        box.addView(wv);
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
+                .setTitle("HP WebScan").setView(box).setPositiveButton("Close", null).show();
     }
 
     private void startAutoDiscovery() {
@@ -1747,4 +2293,3 @@ public class MainActivity extends AppCompatActivity {
         if (connMode.equals("USB OTG")) statusTxt.setText("USB OTG: Connect USB-B to Type-C cable to HP Smart Tank 589");
     }
 }
-// END OF FILE
